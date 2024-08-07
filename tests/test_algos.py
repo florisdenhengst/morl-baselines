@@ -22,8 +22,16 @@ from morl_baselines.multi_policy.pareto_q_learning.pql import PQL
 from morl_baselines.multi_policy.pcn.pcn import PCN
 from morl_baselines.multi_policy.pgmorl.pgmorl import PGMORL
 from morl_baselines.single_policy.esr.eupg import EUPG
+from morl_baselines.single_policy.esr.moppoesr import MOPPOESR
 from morl_baselines.single_policy.ser.mo_q_learning import MOQLearning
+import random
 
+def setup_test(seed = 42):
+    random.seed(seed)
+    np.random.seed(seed)
+    th.manual_seed(seed)
+    th.backends.cudnn.deterministic = True
+    th.use_deterministic_algorithms(True)
 
 def test_pql():
     env_id = "deep-sea-treasure-v0"
@@ -52,6 +60,7 @@ def test_pql():
 
 
 def test_eupg():
+    setup_test()
     env = mo_gym.make("fishwood-v0")
     eval_env = mo_gym.make("fishwood-v0")
 
@@ -65,12 +74,48 @@ def test_eupg():
         elif reward.dim() == 2 and reward.size(1) == 2:
             return th.min(reward[:, 0], reward[:, 1] // 2)
 
-    agent = EUPG(env, scalarization=scalarization, gamma=0.99, log=False)
-    agent.train(total_timesteps=10000, eval_env=eval_env, eval_freq=100)
+    agent = EUPG(env, scalarization=scalarization, gamma=0.99, log=False, seed=42)
+    agent.train(total_timesteps=20000, eval_env=eval_env, eval_freq=100)
 
     scalar_return, scalarized_disc_return, vec_ret, vec_disc_ret = eval_mo_reward_conditioned(
         agent, env=eval_env, scalarization=scalarization, w=np.ones(2)
     )
+    # TODO FdH: remove print statement
+    print(scalar_return, scalarized_disc_return, vec_ret)
+    assert len(vec_ret) == 2
+    assert len(vec_disc_ret) == 2
+
+def test_moppoesr():
+    setup_test()
+    env = mo_gym.make("fishwood-v0")
+    eval_env = mo_gym.make("fishwood-v0")
+
+    def scalarization(reward: np.ndarray, w=None):
+        reward = th.tensor(reward) if not isinstance(reward, th.Tensor) else reward
+        # Handle the case when reward is a single tensor of shape (2, )
+        if reward.dim() == 1 and reward.size(0) == 2:
+            return min(reward[0], reward[1] // 2).item()
+
+        # Handle the case when reward is a tensor of shape (200, 2)
+        elif reward.dim() == 2 and reward.size(1) == 2:
+            return th.min(reward[:, 0], reward[:, 1] // 2)
+
+    agent = MOPPOESR(
+        env,
+        scalarization=scalarization,
+        gamma=0.99,
+        log=False,
+        clip_range=lambda x: 0.1,
+        ent_coef=0.01,
+        vf_coef=0.5,
+        seed=42)
+    agent.train(total_timesteps=20000, eval_env=eval_env, eval_freq=100)
+
+    scalar_return, scalarized_disc_return, vec_ret, vec_disc_ret = eval_mo_reward_conditioned(
+        agent, env=eval_env, scalarization=scalarization, w=np.ones(2)
+    )
+    # TODO FdH: remove print statement
+    print(scalar_return, scalarized_disc_return, vec_ret)
     assert len(vec_ret) == 2
     assert len(vec_disc_ret) == 2
 
