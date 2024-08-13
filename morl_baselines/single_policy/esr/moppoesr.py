@@ -47,8 +47,15 @@ class PolicyNet(nn.Module):
         self.apply(layer_init)
     
     def get_value(self, obs:th.Tensor, acc_reward: th.Tensor):
-        input = th.cat((obs, acc_reward), dim=acc_reward.dim() - 1)
+        input = self.align_inputs(obs, acc_reward)
         return self.critic(input)
+
+    def align_inputs(self, obs: th.Tensor, acc_reward: th.Tensor):
+        if isinstance(obs, th.Tensor) and obs.dim() > 1 and obs.shape[0] == 1:
+            obs = obs.squeeze()
+        if isinstance(acc_reward, th.Tensor) and acc_reward.dim() > 1 and acc_reward.shape[0] == 1:
+            acc_reward = acc_reward.squeeze()
+        return th.cat((obs, acc_reward), dim=acc_reward.dim() - 1)
 
     def forward(self, obs: th.Tensor, acc_reward: th.Tensor):
         """Forward pass of actor.
@@ -60,7 +67,15 @@ class PolicyNet(nn.Module):
         Returns: Probability of each action
 
         """
-        input = th.cat((obs, acc_reward), dim=acc_reward.dim() - 1)
+        # if isinstance(obs, th.Tensor) and obs.dim() > 1:
+        #     print('squeeeeze me')
+        #     obs = obs.squeeze()
+        # if isinstance(acc_reward, th.Tensor) and acc_reward.dim() > 1:
+        #     acc_reward = acc_reward.unsqueeze(dim=1)
+        # print("obs shape:", obs.squeeze().shape, " acc_reward shape:", acc_reward.dim())
+        # print("obs:", obs.squeeze(), " acc_reward:", acc_reward)
+        # print("self rew_dim: ", self.rew_dim)
+        input = self.align_inputs(obs, acc_reward)
         pi = self.actor(input)
         # Normalized sigmoid
         x_exp = th.sigmoid(pi)
@@ -100,7 +115,7 @@ class MOPPOESR(MOPolicy, MOAgent):
         gamma: float = 0.99,
         learning_rate: float = 1e-3,
         project_name: str = "MORL-Baselines",
-        experiment_name: str = "EUPG",
+        experiment_name: str = "MOPPOESR",
         wandb_entity: Optional[str] = None,
         log: bool = True,
         log_every: int = 1000,
@@ -246,6 +261,9 @@ class MOPPOESR(MOPolicy, MOAgent):
         log_prob = distribution.log_prob(action)
         return action.detach().item(), log_prob.detach().item()
     
+    def get_state_values(self, obs: th.Tensor, accrued_rewards: th.Tensor) -> th.Tensor:
+        return self.net.get_value(obs, accrued_rewards)
+
     def evaluate_actions(self, obs: th.Tensor, accrued_rewards: th.Tensor, actions: th.Tensor) -> tuple[th.Tensor, th.Tensor, th.Tensor]:
         """
         """
@@ -270,6 +288,8 @@ class MOPPOESR(MOPolicy, MOAgent):
             rewards,
             old_log_probs,
             old_state_values,
+            scalarized_returns,
+            scalarized_advantages,
             next_obs,
             terminateds,
         ) = self.buffer.get_all_data(to_tensor=True, device=self.device)
@@ -279,24 +299,24 @@ class MOPPOESR(MOPolicy, MOAgent):
             clip_range_vf = self.clip_range_vf(self.global_step)
 
         episodic_return = th.sum(rewards, dim=0)
-        scalarized_return = self.scalarization(episodic_return.cpu().numpy(), self.weights)
-        scalarized_return = th.scalar_tensor(scalarized_return).to(self.device)
+        scalarized_ep_return = self.scalarization(episodic_return.cpu().numpy(), self.weights)
+        scalarized_ep_return = th.scalar_tensor(scalarized_ep_return).to(self.device)
 
         discounted_forward_rewards = self._forward_cumulative_rewards(rewards)
         scalarized_action_values = self.scalarization(discounted_forward_rewards)
-        # TODO FdH: should we do discounting here? -- no this is probably part of the estimation
+
         state_values, log_probs, entropy = self.evaluate_actions(obs, accrued_rewards, actions)
         # print(log_probs)
         # print(state_values)
-        scalarized_state_values = self.scalarization(state_values)
+        # scalarized_state_values = self.scalarization(state_values)
         # For each sample in the batch, get the distribution over actions
         # current_distribution = self.net.distribution(obs, accrued_rewards)
         # Policy gradient
-        # TODO FdH: change to PPO loss
         ratio = th.exp(log_probs - old_log_probs)
+        # print("state values shape: ", state_values.shape, " state values: ", state_values)
         # clipped surrogate loss
         if self.use_advantage:
-            advantages = self.get_advantages(scalarized_action_values, state_values)
+            advantages = scalarized_advantages
         else:
             advantages = scalarized_action_values
         if self.ppo_clip:
@@ -315,7 +335,10 @@ class MOPPOESR(MOPolicy, MOAgent):
             values_pred = old_state_values + th.clamp(
                 state_values - old_state_values, -clip_range_vf, clip_range_vf
             )
-        value_loss = F.mse_loss(scalarized_return, values_pred)
+        # print("scalarized_returns: ", scalarized_returns.unsqueeze(dim=1).shape, " values_pred:", values_pred.shape)
+        # print("scalarized_returns: ", scalarized_returns.unsqueeze(dim=1), " values_pred:", values_pred)
+        value_loss = F.mse_loss(scalarized_returns.unsqueeze(dim=1), values_pred)
+        
 
         # Entropy loss favor exploration
         if entropy is None:
@@ -344,10 +367,13 @@ class MOPPOESR(MOPolicy, MOAgent):
                 {
                     f"losses{log_str}/policy_loss": policy_loss,
                     f"losses{log_str}/entropy_loss": entropy_loss,
-                    f"losses{log_scr}/value_loss": value_loss,
+                    f"losses{log_str}/value_loss": value_loss,
                     f"losses{log_str}/loss": loss,
-                    f"metrics{log_str}/scalarized_state_values": scalarized_state_values.mean(),
-                    f"metrics{log_str}/scalarized_episodic_return": scalarized_return,
+                    f"metrics{log_str}/scalarized_state_values": scalarized_returns.mean(),
+                    f"metrics{log_str}/value_predictions": state_values.mean(),
+                    f"metrics{log_str}/scalarized_episodic_return": scalarized_ep_return,
+                    f"metrics{log_str}/advantage": scalarized_advantages.mean(),
+                    f"metrics{log_str}/state_action_values": scalarized_action_values.mean(),
                     "global_step": self.global_step,
                 },
             )
@@ -387,15 +413,14 @@ class MOPPOESR(MOPolicy, MOAgent):
         # Training loop
         for _ in range(1, total_timesteps + 1):
             self.global_step += 1
-
             with th.no_grad():
                 # For training, takes action according to the policy
-                action, log_prob, value = self.get_action_and_value(th.Tensor([obs]).to(self.device), accrued_reward_tensor)
+                action, log_prob, value = self.get_action_and_value(th.Tensor(np.array(obs)).to(self.device), accrued_reward_tensor)
 
             next_obs, vec_reward, terminated, truncated, info = self.env.step(action)
-            value = 0.0
+
             # Memory update
-            self.buffer.add(obs, accrued_reward_tensor.cpu().numpy(), action, vec_reward, next_obs, log_prob, value, terminated)
+            self.buffer.add(obs, accrued_reward_tensor.cpu().numpy(), action, vec_reward, next_obs, value, log_prob, terminated or truncated)
             accrued_reward_tensor += th.from_numpy(vec_reward).to(self.device)
 
             if eval_env is not None and self.log and self.global_step % eval_freq == 0:
@@ -403,6 +428,7 @@ class MOPPOESR(MOPolicy, MOAgent):
 
             if terminated or truncated:
                 # NN is updated at the end of each episode
+                self.buffer.compute_returns_and_advantages(self.scalarization, self.gamma, self.device)
                 self.update()
                 self.buffer.cleanup()
                 obs, _ = self.env.reset()
