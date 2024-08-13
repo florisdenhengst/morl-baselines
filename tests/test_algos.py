@@ -33,6 +33,32 @@ def setup_test(seed = 42):
     th.backends.cudnn.deterministic = True
     th.use_deterministic_algorithms(True)
 
+def scalarization(reward: np.ndarray, w=None):
+    reward = th.tensor(reward) if not isinstance(reward, th.Tensor) else reward
+    if reward.dim() == 1 and reward.size(0) == 2:
+        nonzero = 0 if reward[1] == 0 else 1
+        return -(reward[0] / reward[1]) * nonzero
+    else:
+        nonzero = ~(reward[:, 1] == 0)
+        return -(reward[:,0] / reward[:,1]) * nonzero
+    
+def scalarization_dst(reward: np.ndarray, w=None, debt=15, deadline=10, penalty=10):
+    reward = th.tensor(reward) if not isinstance(reward, th.Tensor) else reward
+    if reward.dim() == 1 and reward.size(0) == 2:
+        if reward[1] <= 10:
+            return np.log(1+np.exp(reward[0]-debt))
+        else:
+            return np.log(1+np.exp(reward[0]-debt))-(reward[1]-deadline)**2-penalty
+    else:
+        on_time = reward[:, 1] <= deadline
+        payoff = 1  + th.exp(reward[:,0] - debt)
+        before_deadline = th.log(payoff)
+        after_deadline = th.log(1 + payoff - (reward[:,1]-deadline)**2 - penalty)
+        scalarized = th.where(on_time, before_deadline, after_deadline)
+        return scalarized
+
+        
+
 def test_pql():
     env_id = "deep-sea-treasure-v0"
     env = mo_gym.make(env_id, dst_map=CONCAVE_MAP)
@@ -74,14 +100,14 @@ def test_eupg():
         elif reward.dim() == 2 and reward.size(1) == 2:
             return th.min(reward[:, 0], reward[:, 1] // 2)
 
-    agent = EUPG(env, scalarization=scalarization, gamma=0.99, log=False, seed=42)
+    agent = EUPG(env, scalarization=scalarization, gamma=0.99, log=True, seed=42)
     agent.train(total_timesteps=20000, eval_env=eval_env, eval_freq=100)
 
     scalar_return, scalarized_disc_return, vec_ret, vec_disc_ret = eval_mo_reward_conditioned(
         agent, env=eval_env, scalarization=scalarization, w=np.ones(2)
     )
     # TODO FdH: remove print statement
-    print(scalar_return, scalarized_disc_return, vec_ret)
+    print(scalar_return, scalarized_disc_return, vec_ret, vec_disc_ret)
     assert len(vec_ret) == 2
     assert len(vec_disc_ret) == 2
 
@@ -104,7 +130,7 @@ def test_moppoesr():
         env,
         scalarization=scalarization,
         gamma=0.99,
-        log=False,
+        log=True,
         clip_range=lambda x: 0.1,
         ent_coef=0.01,
         vf_coef=0.5,
@@ -116,6 +142,51 @@ def test_moppoesr():
     )
     # TODO FdH: remove print statement
     print(scalar_return, scalarized_disc_return, vec_ret)
+    assert len(vec_ret) == 2
+    assert len(vec_disc_ret) == 2
+
+
+def test_eupg_dst():
+    setup_test()
+    env = mo_gym.make("deep-sea-treasure-v0")
+    eval_env = mo_gym.make("deep-sea-treasure-v0")
+
+    agent = EUPG(env, scalarization=scalarization_dst, gamma=0.99, log=True, seed=42)
+    agent.train(total_timesteps=100000, eval_env=eval_env, eval_freq=100)
+
+    scalar_return, scalarized_disc_return, vec_ret, vec_disc_ret = eval_mo_reward_conditioned(
+        agent, env=eval_env, scalarization=scalarization_dst, w=np.ones(2)
+    )
+    # TODO FdH: remove print statement
+    print(scalar_return, scalarized_disc_return, vec_ret)
+    assert len(vec_ret) == 2
+    assert len(vec_disc_ret) == 2
+
+
+def test_moppoesr_dst():
+    setup_test()
+    env = mo_gym.make("deep-sea-treasure-v0")
+    eval_env = mo_gym.make("deep-sea-treasure-v0")
+
+    agent = MOPPOESR(
+        env,
+        scalarization=scalarization_dst,
+        gamma=0.99,
+        log=True,
+        clip_range=lambda x: 0.3,
+        ent_coef=0.00,
+        max_grad_norm=float('inf'),
+        vf_coef=0.5,
+        use_advantage=False,
+        ppo_clip=True,
+        seed=42)
+    agent.train(total_timesteps=100000, eval_env=eval_env, eval_freq=100)
+
+    scalar_return, scalarized_disc_return, vec_ret, vec_disc_ret = eval_mo_reward_conditioned(
+        agent, env=eval_env, scalarization=scalarization_dst, w=np.ones(2)
+    )
+    # TODO FdH: remove print statement
+    print(scalar_return, scalarized_disc_return, vec_ret, vec_disc_ret)
     assert len(vec_ret) == 2
     assert len(vec_disc_ret) == 2
 
