@@ -43,7 +43,7 @@ class PolicyNet(nn.Module):
 
         # |S|+|R| -> ... -> |A|
         self.actor = mlp(input_dim, action_dim, net_arch, activation_fn=nn.Tanh)
-        self.critic = mlp(input_dim, 1, net_arch, activation_fn=nn.Tanh)
+        self.critic = mlp(input_dim, rew_dim, net_arch, activation_fn=nn.Tanh)
         self.apply(layer_init)
     
     def get_value(self, obs:th.Tensor, acc_reward: th.Tensor):
@@ -76,6 +76,10 @@ class PolicyNet(nn.Module):
         # print("obs:", obs.squeeze(), " acc_reward:", acc_reward)
         # print("self rew_dim: ", self.rew_dim)
         input = self.align_inputs(obs, acc_reward)
+        # print('obs:', obs)
+        # print('acc_rew:', acc_reward)
+        # print('input:', input)
+        # print('input shape:', input.shape)
         pi = self.actor(input)
         # Normalized sigmoid
         x_exp = th.sigmoid(pi)
@@ -288,7 +292,7 @@ class MOPPOESR(MOPolicy, MOAgent):
             rewards,
             old_log_probs,
             old_state_values,
-            scalarized_returns,
+            returns,
             scalarized_advantages,
             next_obs,
             terminateds,
@@ -335,9 +339,7 @@ class MOPPOESR(MOPolicy, MOAgent):
             values_pred = old_state_values + th.clamp(
                 state_values - old_state_values, -clip_range_vf, clip_range_vf
             )
-        # print("scalarized_returns: ", scalarized_returns.unsqueeze(dim=1).shape, " values_pred:", values_pred.shape)
-        # print("scalarized_returns: ", scalarized_returns.unsqueeze(dim=1), " values_pred:", values_pred)
-        value_loss = F.mse_loss(scalarized_returns.unsqueeze(dim=1), values_pred)
+        value_loss = F.mse_loss(returns, values_pred)
         
 
         # Entropy loss favor exploration
@@ -386,11 +388,6 @@ class MOPPOESR(MOPolicy, MOAgent):
             flip_rewards[i] = cumulative_rewards
         forward_rewards = flip_rewards.flip(dims=[0])
         return forward_rewards
-    
-    def get_advantages(self, returns, values):
-        # TODO FdH: this should be simply the Monte-Carlo advantage estimator, validate this
-        return returns - values
-
 
     def train(self, total_timesteps: int, eval_env: Optional[gym.Env] = None, eval_freq: int = 1000, start_time=None):
         """Train the agent.

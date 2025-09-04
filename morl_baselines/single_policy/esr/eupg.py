@@ -41,6 +41,13 @@ class PolicyNet(nn.Module):
         # |S|+|R| -> ... -> |A|
         self.net = mlp(input_dim, action_dim, net_arch, activation_fn=nn.Tanh)
         self.apply(layer_init)
+    
+    def align_inputs(self, obs: th.Tensor, acc_reward: th.Tensor):
+        if isinstance(obs, th.Tensor) and obs.dim() > 1 and obs.shape[0] == 1:
+            obs = obs.squeeze()
+        if isinstance(acc_reward, th.Tensor) and acc_reward.dim() > 1 and acc_reward.shape[0] == 1:
+            acc_reward = acc_reward.squeeze()
+        return th.cat((obs, acc_reward), dim=acc_reward.dim() - 1)
 
     def forward(self, obs: th.Tensor, acc_reward: th.Tensor):
         """Forward pass.
@@ -52,7 +59,7 @@ class PolicyNet(nn.Module):
         Returns: Probability of each action
 
         """
-        input = th.cat((obs, acc_reward), dim=acc_reward.dim() - 1)
+        input = self.align_inputs(obs, acc_reward)
         pi = self.net(input)
         # Normalized sigmoid
         x_exp = th.sigmoid(pi)
@@ -156,6 +163,7 @@ class EUPG(MOPolicy, MOAgent):
             action_dim=self.action_dim,
             net_arch=self.net_arch,
         ).to(self.device)
+
         self.optimizer = optim.Adam(self.net.parameters(), lr=self.learning_rate)
 
         # Logging
@@ -237,8 +245,18 @@ class EUPG(MOPolicy, MOAgent):
         scalarized_return = self.scalarization(episodic_return.cpu().numpy(), self.weights)
         scalarized_return = th.scalar_tensor(scalarized_return).to(self.device)
 
-        discounted_forward_rewards = self._forward_cumulative_rewards(rewards)
+        discounted_backward_reward = self._backward_cumulative_reward(rewards) #G_\tau^-
+        discounted_forward_rewards = self._forward_cumulative_rewards(rewards) #G_\tau^+
         scalarized_values = self.scalarization(discounted_forward_rewards)
+
+        # if self.global_step % 1000 == 0:
+        #     print('rewards:', rewards)
+        #     print('discounted_forward_rewards:', discounted_forward_rewards)
+        #     print('discounted_backward_rewards:', discounted_backward_reward)
+        #     print('combined:', discounted_forward_rewards+discounted_backward_reward)
+        #     print('scalarized_combined:', self.scalarization(discounted_forward_rewards+discounted_backward_reward))
+        #     print('scalarized_values:', scalarized_values)
+        #     print('accrued_rewards:', accrued_rewards)
         # For each sample in the batch, get the distribution over actions
         current_distribution = self.net.distribution(obs, accrued_rewards)
         # Policy gradient
@@ -258,6 +276,13 @@ class EUPG(MOPolicy, MOAgent):
                     "global_step": self.global_step,
                 },
             )
+
+    def _backward_cumulative_reward(self, rewards):
+        backward_rewards = th.zeros(rewards.shape).to(self.device)
+        for i in range(len(rewards)):
+            running_gamma = self.gamma**i
+            backward_rewards[i] = rewards[i] * running_gamma
+        return backward_rewards.cumsum(dim=0)
 
     def _forward_cumulative_rewards(self, rewards):
         flip_rewards = rewards.flip(dims=[0])
@@ -294,7 +319,7 @@ class EUPG(MOPolicy, MOAgent):
                 # For training, takes action according to the policy
                 action = self.__choose_action(th.Tensor([obs]).to(self.device), accrued_reward_tensor)
             next_obs, vec_reward, terminated, truncated, info = self.env.step(action)
-
+            # print(vec_reward[0])
             # Memory update
             self.buffer.add(obs, accrued_reward_tensor.cpu().numpy(), action, vec_reward, next_obs, terminated)
             accrued_reward_tensor += th.from_numpy(vec_reward).to(self.device)

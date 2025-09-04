@@ -42,19 +42,35 @@ def scalarization(reward: np.ndarray, w=None):
         nonzero = ~(reward[:, 1] == 0)
         return -(reward[:,0] / reward[:,1]) * nonzero
     
-def scalarization_dst(reward: np.ndarray, w=None, debt=15, deadline=10, penalty=10):
+def scalarization_dst(reward: np.ndarray, w=None, debt=12, deadline=10, penalty=20):
     reward = th.tensor(reward) if not isinstance(reward, th.Tensor) else reward
     if reward.dim() == 1 and reward.size(0) == 2:
-        if reward[1] <= 10:
+        # print(reward[0])
+        reward[1] = abs(reward[1])
+        if reward[1] <= deadline:
             return np.log(1+np.exp(reward[0]-debt))
         else:
             return np.log(1+np.exp(reward[0]-debt))-(reward[1]-deadline)**2-penalty
     else:
+        # print('reward r0:', reward[:,0])
+        # print('reward r1:', reward[:,1])
+        # # print()
+        # if(reward[:,0].max() > 0.701):
+        #     print(reward[:,0].max())
+        reward[:,1] = th.abs(reward[:,1])
         on_time = reward[:, 1] <= deadline
         payoff = 1  + th.exp(reward[:,0] - debt)
         before_deadline = th.log(payoff)
-        after_deadline = th.log(1 + payoff - (reward[:,1]-deadline)**2 - penalty)
+        pre_log = 1 + payoff - (reward[:,1]-deadline)**2 - penalty
+        after_deadline = th.log(payoff) - (reward[:,1]-deadline)**2 - penalty
         scalarized = th.where(on_time, before_deadline, after_deadline)
+        # print('test:', 1 + payoff - (reward[:,1]-deadline)**2 - penalty)
+        # print('on time:', on_time)
+        # print('payoff:', payoff)
+        # print('before_deadline', before_deadline)
+        # print('pre log', pre_log)
+        # print('after_deadline', after_deadline)
+        # print('scalarized:', scalarized)
         return scalarized
 
         
@@ -100,7 +116,7 @@ def test_eupg():
         elif reward.dim() == 2 and reward.size(1) == 2:
             return th.min(reward[:, 0], reward[:, 1] // 2)
 
-    agent = EUPG(env, scalarization=scalarization, gamma=0.99, log=True, seed=42)
+    agent = EUPG(env, scalarization=scalarization, gamma=0.99, log=False, seed=42)
     agent.train(total_timesteps=20000, eval_env=eval_env, eval_freq=100)
 
     scalar_return, scalarized_disc_return, vec_ret, vec_disc_ret = eval_mo_reward_conditioned(
@@ -130,8 +146,8 @@ def test_moppoesr():
         env,
         scalarization=scalarization,
         gamma=0.99,
-        log=True,
-        clip_range=lambda x: 0.1,
+        log=False,
+        clip_range=lambda x: 0.3,
         ent_coef=0.01,
         vf_coef=0.5,
         seed=42)
@@ -151,7 +167,7 @@ def test_eupg_dst():
     env = mo_gym.make("deep-sea-treasure-v0")
     eval_env = mo_gym.make("deep-sea-treasure-v0")
 
-    agent = EUPG(env, scalarization=scalarization_dst, gamma=0.99, log=True, seed=42)
+    agent = EUPG(env, scalarization=scalarization_dst, gamma=0.99, log=False, seed=42)
     agent.train(total_timesteps=100000, eval_env=eval_env, eval_freq=100)
 
     scalar_return, scalarized_disc_return, vec_ret, vec_disc_ret = eval_mo_reward_conditioned(
@@ -172,7 +188,7 @@ def test_moppoesr_dst():
         env,
         scalarization=scalarization_dst,
         gamma=0.99,
-        log=True,
+        log=False,
         clip_range=lambda x: 0.3,
         ent_coef=0.00,
         max_grad_norm=float('inf'),
