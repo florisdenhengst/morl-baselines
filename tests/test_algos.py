@@ -19,6 +19,7 @@ from morl_baselines.multi_policy.ipro.ipro import IPRO
 from morl_baselines.multi_policy.ipro.ipro_2d import IPRO2D
 from morl_baselines.multi_policy.lcn.lcn import LCN
 from morl_baselines.multi_policy.linear_support.linear_support import LinearSupport
+from morl_baselines.multi_policy.linear_support.musols import MUSOLS
 from morl_baselines.multi_policy.multi_policy_moqlearning.mp_mo_q_learning import (
     MPMOQLearning,
 )
@@ -156,6 +157,37 @@ def test_ols():
         policies.append(new_policy)
 
         removed_inds = ols.add_solution(discounted_vec, w)
+
+        for ind in removed_inds:
+            policies.pop(ind)  # remove policies that are no longer needed
+
+def test_musols():
+    env = mo_gym.make("deep-sea-treasure-v0")
+
+    W = np.array([[0.8, 0.1], [0.1, 0.8]], dtype=np.float32)
+    musols = MUSOLS(user_weights=W, epsilon=0.0001, verbose=True)
+    policies = []
+    while True:
+        w = musols.next_weight()
+        if musols.ended():
+            break
+
+        new_policy = MOQLearning(
+            env,
+            weights=w,
+            learning_rate=0.3,
+            gamma=0.9,
+            initial_epsilon=1,
+            final_epsilon=0.01,
+            epsilon_decay_steps=int(1e5),
+            log=False,
+        )
+        new_policy.train(0, total_timesteps=int(1e4))
+
+        _, _, vec, discounted_vec = new_policy.policy_eval(eval_env=env, weights=w)
+        policies.append(new_policy)
+
+        removed_inds = musols.add_solution(discounted_vec, w)
 
         for ind in removed_inds:
             policies.pop(ind)  # remove policies that are no longer needed
