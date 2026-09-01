@@ -91,6 +91,7 @@ def test_matches_ols_under_extreme_disagreement(num_objectives, seed):
 
     full_ccs = {tuple(np.round(v, 4)) for v in ols.ccs}
     restricted_ccs = {tuple(np.round(v, 4)) for v in musols.ccs}
+    print("OLS CCS size: %d, MUSOLS CCS size: %d" % (len(ols.ccs), len(musols.ccs)))
     assert full_ccs == restricted_ccs
 
 
@@ -133,6 +134,7 @@ def test_musols_performance_smoke_test():
     musols = run_outer_loop(MUSOLS(user_weights=W, epsilon=0.01, verbose=False), candidates)
     musols_time = time.perf_counter() - start
 
+    print("OLS CCS size: %d, MUSOLS CCS size: %d" % (len(ols.ccs), len(musols.ccs)))
     print("OLS took %d iterations, MUSOLS took %d iterations" % (ols.iteration, musols.iteration))
     assert musols.iteration <= ols.iteration
     print("OLS computed %d corner weights, MUSOLS computed %d corner weights" % (len(ols.compute_corner_weights()), len(musols.compute_corner_weights())))
