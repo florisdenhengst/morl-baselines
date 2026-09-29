@@ -22,11 +22,18 @@ python experiments/musols_benchmark/make_paper_assets.py results/merged/*.jsonl 
 
 ## Adapt these before submitting
 
-Three things cannot be guessed and must be set for your cluster:
+`study.sbatch` is currently set up for Snellius: it runs `module load 2025` and `module load cuda`, requests
+the `genoa` partition, and defaults `MUSOLS_REPO` to `/home/fdenhengst/MUSOLS/morl-baselines`. On any other
+cluster, three things must be changed:
 
-1. **`study.sbatch`** — add your `--partition` / `--account`, and fix the environment activation block.
-2. **`MUSOLS_REPO`** — export the repository root if you submit from elsewhere (defaults to `$PWD`).
-3. **`MUSOLS_CONDA` / `MUSOLS_ENV`** — conda prefix and environment name (default `~/miniconda3`, `morl_bl_musols`).
+1. **`study.sbatch`** — your `--partition` / `--account`, and the `module load` lines.
+2. **`MUSOLS_REPO`** — the repository root, i.e. the directory holding `experiments/` and `morl_baselines/`
+   (*not* the `slurm/` subdirectory: the script appends `experiments/musols_benchmark/run_study.py` to it).
+3. **`MUSOLS_CONDA` / `MUSOLS_ENV`** — conda *installation prefix* and *environment name*, two different
+   things (default `~/miniconda3` and `morl_bl_musols`).
+
+`module load cuda` is harmless but not needed: every task is submitted without a GPU, so torch runs on CPU
+regardless. Drop it if your scheduler charges for the module set.
 
 The job requests **1 core and 8 GB per task, no GPU**, and pins `OMP_NUM_THREADS=1`. That pinning is not
 incidental: these runs are small-network SAC plus polytope vertex enumeration, neither of which parallelizes

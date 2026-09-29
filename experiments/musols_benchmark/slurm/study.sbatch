@@ -18,7 +18,7 @@
 #SBATCH --mem=8G
 # --array and --time are supplied at submission time, since they differ per sweep.
 # Add your scheduler's requirements here, e.g.:
-# #SBATCH --partition=compute
+#SBATCH --partition=genoa
 # #SBATCH --account=your-account
 
 set -euo pipefail
@@ -39,12 +39,18 @@ export MUJOCO_GL=osmesa   # MuJoCo must not try to open a display on a headless 
 export SDL_VIDEODRIVER=dummy  # highway-env pulls in pygame, which does the same.
 
 # ---------------------------------------------------------------- adapt this block to your cluster
-# module load python/3.12
-source "${MUSOLS_CONDA:-$HOME/miniconda3}/etc/profile.d/conda.sh"
-conda activate "${MUSOLS_ENV:-morl_bl_musols}"
+module load 2025
+module load cuda
+
+# MUSOLS_CONDA is the conda *installation prefix*; MUSOLS_ENV is the environment name inside it.
+MUSOLS_CONDA=${MUSOLS_CONDA:-$HOME/miniconda3}
+MUSOLS_ENV=${MUSOLS_ENV:-morl_bl_musols}
+source "$MUSOLS_CONDA/etc/profile.d/conda.sh"
+conda activate "$MUSOLS_ENV"
 # -------------------------------------------------------------------------------------------------
 
-REPO_ROOT=${MUSOLS_REPO:-$PWD}
+# Repository root -- the directory containing experiments/ and morl_baselines/, not the slurm/ subdirectory.
+REPO_ROOT=${MUSOLS_REPO:-/home/fdenhengst/MUSOLS/morl-baselines}
 RESULT_DIR="$REPO_ROOT/results/$NAME"
 mkdir -p "$RESULT_DIR"
 
