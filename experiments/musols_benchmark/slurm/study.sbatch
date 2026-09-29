@@ -40,10 +40,10 @@ export SDL_VIDEODRIVER=dummy  # highway-env pulls in pygame, which does the same
 
 # ---------------------------------------------------------------- adapt this block to your cluster
 module load 2025
-module load cuda
+module load CUDA/12.8.0
 
 # MUSOLS_CONDA is the conda *installation prefix*; MUSOLS_ENV is the environment name inside it.
-MUSOLS_CONDA=${MUSOLS_CONDA:-$HOME/miniconda3}
+MUSOLS_CONDA=${MUSOLS_CONDA:-$HOME/miniforge3}
 MUSOLS_ENV=${MUSOLS_ENV:-morl_bl_musols}
 source "$MUSOLS_CONDA/etc/profile.d/conda.sh"
 conda activate "$MUSOLS_ENV"
