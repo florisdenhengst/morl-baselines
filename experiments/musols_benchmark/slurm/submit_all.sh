@@ -36,7 +36,7 @@ JOBS=(
     # OLS is given a 600 s budget per algorithm. It will exhaust it from about d=6 onward; that is the result,
     # not a failure, and `converged` records it. Ratios from censored cells are lower bounds -- analyze.py
     # reports the converged fraction alongside them so the two are never confused.
-    "synthetic|100|08:00:00|265|--synthetic-objectives 2 3 4 5 6 7 8 --synthetic-candidates 30 --seeds $SEEDS --num-users 2 3 --concentrations 1 5 50 --timeout 600 --log-trajectory"
+    "synthetic|100|08:00:00|265|--synthetic-objectives 2 3 4 5 6 7 8 --synthetic-candidates 30 --synthetic-geometry gaussian --seeds $SEEDS --num-users 2 3 --concentrations 1 5 50 --timeout 600 --log-trajectory"
 
     # --- deep RL: budgets raised to convergence-plausible values (see README.md) --------------------------
     "minecart|16|04:00:00|440|--env minecart --seeds $SEEDS --num-users 2 3 --concentrations 5 --total-timesteps 100000 --timeout 3600"

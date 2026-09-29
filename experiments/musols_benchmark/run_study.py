@@ -70,7 +70,10 @@ def parse_args():
         help="Additionally sweep the synthetic scaling task at these numbers of objectives d.",
     )
     parser.add_argument("--synthetic-candidates", type=int, default=30, help="Attainable payoffs N.")
-    parser.add_argument("--synthetic-geometry", type=str, default="sphere", choices=("sphere", "gaussian"))
+    # "sphere" puts every candidate on the convex hull, so all N are extremal and corner-weight enumeration
+    # grows combinatorially in N and d -- useful only as a deliberate worst-case stress test, never a sane
+    # default. "gaussian" gives a realistic mix of extremal and dominated candidates.
+    parser.add_argument("--synthetic-geometry", type=str, default="gaussian", choices=("sphere", "gaussian"))
     parser.add_argument("--seeds", type=str, nargs="+", default=["0-4"], help="Seeds; each an int or 'start-end'.")
     parser.add_argument("--num-users", type=int, nargs="+", default=[2], help="Panel sizes m to sweep.")
     parser.add_argument(

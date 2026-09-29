@@ -249,7 +249,8 @@ class LinearSupport:
                 if np.dot(self.ccs[i], w) == self.max_scalarized_value(w) and np.dot(value, w) < np.dot(self.ccs[i], w)
             ]
             if len(weights_optimal) == 0:
-                print("removed value", self.ccs[i])
+                if self.verbose:
+                    print("removed value", self.ccs[i])
                 removed_indx.append(i)
                 self.ccs.pop(i)
                 self.weight_support.pop(i)
