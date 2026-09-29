@@ -41,8 +41,15 @@ regardless. Drop it if your scheduler charges for the module set.
 The job requests **1 core and 8 GB per task, no GPU**, and pins `OMP_NUM_THREADS=1`. That pinning is not
 incidental: these runs are small-network SAC plus polytope vertex enumeration, neither of which parallelizes
 well, and torch will otherwise seize every core on the node and collapse throughput once hundreds of array
-tasks share machines. `MUJOCO_GL=osmesa` and `SDL_VIDEODRIVER=dummy` keep MuJoCo and highway-env's pygame
-dependency from trying to open a display on a headless node.
+tasks share machines. `SDL_VIDEODRIVER=dummy` keeps highway-env's pygame dependency from trying to open a
+display on a headless node.
+
+**`MUJOCO_GL=disable`, not `osmesa`.** MuJoCo resolves its GL backend when the module is *imported*, not when
+a frame is rendered, so `MUJOCO_GL=osmesa` makes `import mujoco` fail outright on a node without the OSMesa
+shared library — PyOpenGL raises `'NoneType' object has no attribute 'glGetError'` — and it takes hopper and
+**reacher** down with it even though neither renders anything during training. `disable` skips GL
+initialization entirely, which is what a training-only job wants. Only a job that actually records video
+needs a real backend: `submit_demo.sbatch` sets one only under `RECORD_VIDEO=1`.
 
 ## Where the budgets come from
 

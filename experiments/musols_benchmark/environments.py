@@ -318,7 +318,7 @@ _register(
 _register(
     EnvironmentConfig(
         key="hopper",
-        env_id="mo-hopper-v4",
+        env_id="mo-hopper-v5",
         env_kwargs={},
         num_objectives=3,
         # Cyclic locomotion needs a long horizon: the trade-off between an energetic push-off now and staying

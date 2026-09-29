@@ -3,6 +3,7 @@
 #
 #   sbatch submit_demo.sbatch                       # hopper, the default
 #   sbatch submit_demo.sbatch fruit-tree demo_ft    # any other registered environment
+#   RECORD_VIDEO=1 sbatch submit_demo.sbatch        # also render a rollout per policy (needs working OSMesa)
 #
 # This is not part of the evaluation and is deliberately not in submit_all.sh: it produces the artifact behind
 # a talk slide or the paper's webpage, not a reported number. It is a single task rather than an array,
@@ -33,7 +34,17 @@ export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
-export MUJOCO_GL=osmesa
+# See study.sbatch: MuJoCo picks its GL backend when the module is imported, so "osmesa" breaks `import
+# mujoco` on a node lacking the OSMesa library even for a run that renders nothing. Training needs no GL.
+# Pass RECORD_VIDEO=1 to request gait rollouts -- that does need a working backend, so it is opt-in and
+# failures there are contained (run_demo.py skips a video rather than losing the numeric artifact).
+if [[ ${RECORD_VIDEO:-0} == 1 ]]; then
+    export MUJOCO_GL=${MUJOCO_GL:-osmesa}
+    VIDEO_FLAG="--record-video"
+else
+    export MUJOCO_GL=disable
+    VIDEO_FLAG=""
+fi
 export SDL_VIDEODRIVER=dummy
 
 # ---------------------------------------------------------------- adapt this block to your cluster
@@ -52,9 +63,10 @@ mkdir -p "$OUT_DIR"
 
 echo "host=$(hostname) job=${SLURM_JOB_ID:-none} env=$ENV_KEY out=$OUT_DIR"
 
+# shellcheck disable=SC2086 -- VIDEO_FLAG is empty or a single flag
 python "$REPO_ROOT/experiments/musols_benchmark/run_demo.py" \
     --env "$ENV_KEY" \
-    --out "$OUT_DIR"
+    --out "$OUT_DIR" $VIDEO_FLAG
 
 echo ""
 echo "Demo artifact written. Fetch it with:"

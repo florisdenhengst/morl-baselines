@@ -35,7 +35,12 @@ export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
-export MUJOCO_GL=osmesa   # MuJoCo must not try to open a display on a headless node.
+# MuJoCo resolves a GL backend at *import* time, not when something is rendered. "osmesa" therefore makes
+# `import mujoco` fail outright on a node without the OSMesa shared library (PyOpenGL raises
+# "'NoneType' object has no attribute 'glGetError'"), even though these runs never render a frame. "disable"
+# skips GL initialization entirely, which is what a training-only job wants. Set it to osmesa/egl only for a
+# job that actually renders, and only where that backend is known to work.
+export MUJOCO_GL=disable
 export SDL_VIDEODRIVER=dummy  # highway-env pulls in pygame, which does the same.
 
 # ---------------------------------------------------------------- adapt this block to your cluster

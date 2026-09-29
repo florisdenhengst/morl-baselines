@@ -186,19 +186,22 @@ def highway_reward_scaler(env: gym.Env) -> PerObjectiveRewardScaler:
 
 
 def hopper_reward_scaler(env: gym.Env) -> PerObjectiveRewardScaler:
-    """Static reward normalization for mo-hopper-v4.
+    """Static reward normalization for mo-hopper-v5.
 
-    Objectives: [x_velocity, height, -energy_cost], where `height = 10 * (z - z_init)` and
-    `energy_cost = sum(action^2)`. Two structural facts drive the divisors, both read off the environment's
+    Objectives: [x_velocity, height, -energy_cost], where `height = 10 * z_distance_from_origin` and the
+    energy objective is `reward_ctrl / ctrl_cost_weight`, i.e. exactly `-sum(action^2)` with the original
+    environment's scaling undone. Two structural facts drive the divisors, both read off the environment's
     own `step()` rather than estimated:
 
-    1. `healthy_reward` (+1 per step) is added to *all three* objectives, not just one. It is therefore a
+    1. `reward_survive` (+1 per step) is added to *all three* objectives, not just one. It is therefore a
        common per-step offset rather than a trade-off axis -- but it does mean the energy objective peaks at
-       +1 per step for an agent that simply does nothing (`energy_cost = 0`). Standing still is a genuine
+       +1 per step for an agent that simply does nothing (`sum(action^2) = 0`). Standing still is a genuine
        local optimum on that objective, which is what the divisor below is sized against.
-    2. Actions are bounded to [-1, 1]^3, so `energy_cost` lies in exactly [0, 3] and the raw energy objective
-       spans [-2, +1]: a swing of 3 per step, comparable to a competent hopper's ~3 m/s forward velocity.
-       Left raw, a stakeholder weighting energy heavily prefers standing still to hopping.
+    2. Actions are bounded to [-1, 1]^3, so `sum(action^2)` lies in exactly [0, 3] and the raw energy
+       objective spans [-2, +1]: a swing of 3 per step, comparable to a competent hopper's ~3 m/s forward
+       velocity. Left raw, a stakeholder weighting energy heavily prefers standing still to hopping.
+       (Verified against the environment directly: a zero action scores +1.000 on this objective and a
+       full-throttle action -2.000, in both v4 and v5.)
 
     Divisors: velocity by 3 (a competent hopper's ~3 m/s becomes ~1.0 per step), height by 2 (measured
     per-step magnitude peaks near 1.0), and energy by 6 -- deliberately twice what unit-swing scaling alone
