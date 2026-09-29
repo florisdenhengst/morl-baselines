@@ -69,6 +69,7 @@ class TabularQLearningSolver:
         self._num_solved += 1
         agent.train(0, total_timesteps=self.total_timesteps)
         _, _, _, discounted_return = agent.policy_eval(eval_env=self.env, weights=w)
+        self.last_agent = agent  # retained so demos can checkpoint the policy; unused by the study path
         return discounted_return
 
 
@@ -124,6 +125,7 @@ class ContinuousSACSolver:
         self._num_solved += 1
         agent.train(total_timesteps=self.total_timesteps, eval_env=self.env)
         _, _, _, discounted_return = agent.policy_eval(eval_env=self.env, weights=w)
+        self.last_agent = agent  # retained so demos can checkpoint the policy; unused by the study path
         return discounted_return
 
 
@@ -192,6 +194,7 @@ class DiscreteSACSolver:
         self._num_solved += 1
         agent.train(total_timesteps=self.total_timesteps, eval_env=self.env)
         _, _, _, discounted_return = agent.policy_eval(eval_env=self.env, weights=w)
+        self.last_agent = agent  # retained so demos can checkpoint the policy; unused by the study path
         return discounted_return
 
 

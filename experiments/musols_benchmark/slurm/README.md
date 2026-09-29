@@ -4,10 +4,13 @@ Full paper-scale sweep: **n=100 sampled stakeholder panels per configuration**, 
 baseline. Roughly **3350 core-hours across 333 array tasks**. The deep-RL sweeps dominate that figure: at
 500k-step training budgets, lunar-lander and highway alone account for about 2540 of those core-hours.
 
+A separate job, `submit_demo.sbatch`, builds the showcase artifact for a talk or the paper's webpage. It is
+*not* part of the evaluation — see "The showcase demo" below.
+
 ```bash
 cd experiments/musols_benchmark/slurm
 ./submit_all.sh --dry-run      # print the plan and cost estimate, submit nothing
-./submit_all.sh                # submit everything
+./submit_all.sh                # submit every sweep the paper reports
 ./submit_all.sh synthetic      # submit one sweep
 ./collect.sh --check           # completeness report once jobs finish
 ./collect.sh                   # merge shards into results/merged/
@@ -55,10 +58,13 @@ Per-cell costs (one cell = all four algorithms on one panel) were measured on a 
 | reacher | 4400 | 22 s at 5k steps, scaled to 500k |
 | lunar-lander | 21375 | 342 s at 8k steps, scaled to 500k |
 | highway | 24300 | 243 s at 5k steps, scaled to 500k |
-| water-reservoir | 2384 | one full cell at 75k steps |
+| water-reservoir | 2384 | one full cell at 75k steps (real cost measured later at ~9700 — see note) |
+| hopper (demo) | 58528 | **measured**: 3658 s per 1M-step evaluation, x ~16 evaluations per cell |
 
-These are linear extrapolations and run pessimistic: minecart's real per-evaluation cost came in at ~130–190 s
-against the 440 s its row predicted at 100k, so treat the deep-RL rows as an upper bound on the true spend.
+Most of these are linear extrapolations and their accuracy varies in both directions: minecart's real
+per-evaluation cost came in at ~130–190 s against the 440 s its row predicted at 100k, while water-reservoir's
+real per-cell cost came in at ~9700 s against a predicted 2384 s (4.1x *under*-estimated). Hopper's row is the
+one directly measured at its actual training budget, so it is the most trustworthy of the deep-RL entries.
 
 Every job passes an explicit `--timeout`: a per-algorithm wall-clock cap within one cell, sized above from the
 solver and the measured costs in the table above (with roughly a 30–60× margin for the cheap/exact
@@ -96,6 +102,16 @@ settings chosen for how each one actually fails rather than one global default:
   stubs. MOSACDiscrete's autotuned entropy coefficient *starts at exp(0)=1.0* and ignores the `alpha` argument
   while autotune is on, so disabling autotune is the only way to actually start conservative. Frame stacking
   makes relative vehicle velocities observable from a single input instead of inferable from one snapshot.
+- **hopper (demo only, 1M steps)**, `learning_starts=10_000`, `buffer_size=1_000_000`, `net_arch=[256,256]`,
+  γ=0.99, autotune left **on**. The 3-link hopper terminates the instant the torso tilts too far, so early
+  episodes are near-instant failures; 10k steps of uniform sampling gives the Q-function a spread of joint
+  configurations before any gradient update, and the full 1M buffer keeps those early unstable steps
+  comparable against steady-state strides acquired much later. Autotune is *kept* here, unlike highway:
+  MOSAC starts alpha at exp(0)=1.0, which is the conservatively-high initial entropy this task wants so the
+  policy does not commit early to a lopsided leg-extension pattern. Its reward scaler exists because
+  `healthy_reward` (+1/step) is added to all three objectives, so an idle agent scores the *maximum* on the
+  energy objective — standing still is a real local optimum, and the raw energy swing of 3/step is as large
+  as forward velocity's.
 - **water-reservoir stays at 75k**, where we verified policies genuinely differentiate by weight vector.
 
 Minecart is sparse-reward and even 500k may be low; if its policies still look untrained (a `|CCS|` of 1 for
@@ -106,6 +122,57 @@ every algorithm is the tell), that budget is the first thing to raise again.
 Cheap environments get the full `m ∈ {2,3,4} × κ ∈ {1,5,50}` sweep (900 cells) plus anytime trajectories. The
 expensive deep-RL environments get `m ∈ {2,3}` at a single κ (200 cells) and no trajectories: n=100 panels per
 configuration is what statistical power requires, and extra κ values there would cost more than they reveal.
+
+## The showcase demo
+
+`run_demo.py` answers a different question from `run_study.py`, for a different audience. The study asks
+"does MUSOLS beat the baselines across many randomly sampled panels, with confidence intervals" — what a
+reviewer needs. The demo asks what an audience needs: given **two named stakeholders with concrete stated
+preferences**, what set of policies does each method actually hand them, and what does moving the consensus
+between them do?
+
+```bash
+sbatch submit_demo.sbatch                      # hopper (default), ~11 h, one task
+sbatch submit_demo.sbatch fruit-tree demo_ft   # any registered environment
+
+# or locally, in seconds, against an exact solver -- useful for building the page:
+python experiments/musols_benchmark/run_demo.py --env deep-sea-treasure --out demo_dst
+
+# control environments can also render one rollout per coverage-set policy:
+python experiments/musols_benchmark/run_demo.py --env hopper --record-video --out demo_hopper
+```
+
+Two environments are worth showing together. **deep-sea-treasure** is legible — a reader can see the whole
+trade-off at once. **hopper** is the control example: d=3 (forward velocity, hop height, energy), continuous
+actions, and with `--record-video` each coverage-set policy is rendered so an audience can watch the
+logistics operator's gait next to the maintenance engineer's. Walker is *not* a substitute here: `mo-walker2d`
+is only d=2 (velocity and control cost), so with m=2 stakeholders min(d,m)=2, Omega_W is the full simplex and
+MUSOLS has nothing to restrict -- the demo would show no advantage by construction.
+
+Three deliberate differences from the study: the panel is the environment's own hand-written
+`stakeholder_weights` rather than a Dirichlet sample, so every number on screen belongs to a describable
+scenario; policies are **checkpointed** so rollouts can be rendered per coverage-set member; and the
+comparison is framed as *wasted work* — OLS searches the whole simplex, so some policies it trains are
+optimal only for weights no consensus of these stakeholders can produce, and `run_demo.py` counts them by LP.
+
+On deep-sea-treasure, for instance, MUSOLS returns 7 policies and OLS returns 9, of which **2 are optimal
+only outside the consensus polytope** — MUSOLS's set is exactly OLS's useful subset.
+
+### The artifact
+
+`demo.json` is self-contained and carries `W` plus both coverage sets, which is everything needed to drive an
+interactive consensus slider **client-side**: for a consensus `alpha` in the simplex, the selected policy is
+`argmax_v (W @ alpha) . v` over that algorithm's coverage set. No server, no model inference. For m=2 a
+precomputed `consensus_sweep` is included as well, so a page can bind a slider directly to it.
+
+| key | what it holds |
+|---|---|
+| `W`, `objective_names`, `stakeholder_names` | the scenario, ready to label a UI |
+| `algorithms.{musols,ols}.coverage_set` | the payoff vectors each method returned |
+| `algorithms.*.useful_for_consensus` | per policy: is it optimal anywhere in Omega_W? |
+| `algorithms.*.policy_files` | checkpoint per coverage-set member, for rendering rollouts |
+| `consensus_sweep` | alpha -> winning policy, precomputed (m=2 only) |
+| `comparison` | wasted-policy count, evaluation ratio, wall-clock speedup |
 
 ## The scalability sweep
 

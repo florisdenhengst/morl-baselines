@@ -17,6 +17,7 @@ import numpy as np
 from gymnasium.wrappers import FlattenObservation, FrameStackObservation
 from reward_normalization import (
     highway_reward_scaler,
+    hopper_reward_scaler,
     lunar_lander_reward_scaler,
     minecart_reward_scaler,
     water_reservoir_reward_scaler,
@@ -311,6 +312,69 @@ _register(
             "balances four competing target locations owned by two operators. Trains a real discrete-action "
             "SAC policy per candidate weight."
         ),
+    )
+)
+
+_register(
+    EnvironmentConfig(
+        key="hopper",
+        env_id="mo-hopper-v4",
+        env_kwargs={},
+        num_objectives=3,
+        # Cyclic locomotion needs a long horizon: the trade-off between an energetic push-off now and staying
+        # balanced (and therefore alive, still collecting reward) many steps later only appears at a high
+        # discount. 0.99 over the 1000-step episode limit.
+        gamma=0.99,
+        objective_names=["forward_velocity", "hop_height", "energy_saving"],
+        stakeholder_names=["logistics operator", "maintenance engineer"],
+        # A delivery operator wants throughput (distance covered per episode); a maintenance engineer wants
+        # low actuator wear. Both care about hop height, which stands in for gait stability -- a hopper that
+        # stops clearing the ground is about to fall over, which serves neither party.
+        #
+        # The maintenance stakeholder's energy weight is deliberately capped at 0.50 rather than pushed
+        # higher: because `healthy_reward` is added to every objective, an agent that does nothing scores the
+        # *maximum* +1/step on the energy objective, so an energy-dominant weight vector makes standing still
+        # optimal and the episode degenerates. See reward_normalization.py.
+        stakeholder_weights=np.array(
+            [
+                [0.60, 0.25],  # forward_velocity
+                [0.25, 0.25],  # hop_height
+                [0.15, 0.50],  # energy_saving
+            ],
+            dtype=np.float32,
+        ),
+        solver="sac",
+        solver_kwargs={
+            "total_timesteps": 1_000_000,
+            "net_arch": [256, 256],
+            # The 3-link hopper is inherently unstable and terminates the moment the torso tilts too far or
+            # the height drops below threshold, so early episodes are extremely short. 10k steps of uniform
+            # action sampling gives the Q-function a broad spread of joint configurations to fit before any
+            # gradient update, rather than a buffer of near-identical immediate-failure trajectories.
+            "learning_starts": 10_000,
+            "batch_size": 256,
+            # Full 1M transitions: a hopping gait is only learnable by contrasting the early unstable steps
+            # against full steady-state strides acquired much later, so early data must stay sampleable.
+            "buffer_size": 1_000_000,
+            # Automatic entropy tuning works well on this task, and MOSAC's autotune happens to start exactly
+            # where we want it: log_alpha is initialized to zeros, so alpha begins at exp(0) = 1.0 -- high
+            # enough that the policy keeps exploring rather than committing early to a lopsided, asymmetric
+            # leg-extension pattern, then anneals itself down. (Contrast highway, where that same high start
+            # is harmful and autotune is therefore disabled.) `alpha` is ignored while autotune is on.
+            "autotune": True,
+        },
+        epsilon=0.05,
+        timeout_seconds=1800.0,
+        description=(
+            "Continuous-control locomotion (MuJoCo Hopper, as multi-objectivized in mo-gymnasium). A single "
+            "hopping run balances a logistics operator's demand for throughput against a maintenance "
+            "engineer's demand for low actuator wear, with gait stability shared between them. Trains a real "
+            "continuous-control SAC policy per candidate weight."
+        ),
+        # All three objectives carry the same +1/step healthy_reward, and the raw energy objective swings by 3
+        # per step -- as much as forward velocity -- so without rescaling an energy-weighted stakeholder
+        # prefers standing still to hopping. See reward_normalization.py for the structural bounds used.
+        reward_wrapper=hopper_reward_scaler,
     )
 )
 

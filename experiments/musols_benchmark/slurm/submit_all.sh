@@ -5,6 +5,9 @@
 #   ./submit_all.sh               # submit everything
 #   ./submit_all.sh synthetic     # submit only the named sweep(s)
 #
+# This file covers the sweeps the paper *reports*. The hopper continuous-control demo is deliberately not
+# here: it is illustrative rather than evaluative and is submitted separately via ./submit_hopper_demo.sh.
+#
 # Every sweep uses n=100 sampled stakeholder panels per configuration. Each job passes an explicit
 # --timeout: a per-algorithm wall-clock cap within one cell, sized from the solver and the costs measured for
 # that environment (see README.md "Where the budgets come from"). It is set explicitly here rather than left

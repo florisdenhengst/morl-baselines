@@ -185,6 +185,35 @@ def highway_reward_scaler(env: gym.Env) -> PerObjectiveRewardScaler:
     return PerObjectiveRewardScaler(env, linear_scale={0: 12.0, 1: 16.0, 2: 1.0})
 
 
+def hopper_reward_scaler(env: gym.Env) -> PerObjectiveRewardScaler:
+    """Static reward normalization for mo-hopper-v4.
+
+    Objectives: [x_velocity, height, -energy_cost], where `height = 10 * (z - z_init)` and
+    `energy_cost = sum(action^2)`. Two structural facts drive the divisors, both read off the environment's
+    own `step()` rather than estimated:
+
+    1. `healthy_reward` (+1 per step) is added to *all three* objectives, not just one. It is therefore a
+       common per-step offset rather than a trade-off axis -- but it does mean the energy objective peaks at
+       +1 per step for an agent that simply does nothing (`energy_cost = 0`). Standing still is a genuine
+       local optimum on that objective, which is what the divisor below is sized against.
+    2. Actions are bounded to [-1, 1]^3, so `energy_cost` lies in exactly [0, 3] and the raw energy objective
+       spans [-2, +1]: a swing of 3 per step, comparable to a competent hopper's ~3 m/s forward velocity.
+       Left raw, a stakeholder weighting energy heavily prefers standing still to hopping.
+
+    Divisors: velocity by 3 (a competent hopper's ~3 m/s becomes ~1.0 per step), height by 2 (measured
+    per-step magnitude peaks near 1.0), and energy by 6 -- deliberately twice what unit-swing scaling alone
+    would need, so the control penalty carries roughly half the per-step influence of forward velocity. That
+    is the "scale the control penalty down relative to forward velocity" requirement applied at the reward
+    level; the stakeholder weight matrix in environments.py applies it again at the preference level by
+    capping even the maintenance stakeholder's energy weight at 0.50.
+
+    Note this does not, and should not, make the stand-still policy disappear: for a stakeholder who genuinely
+    only cares about actuator wear it is a legitimately Pareto-optimal choice and belongs in the coverage set.
+    The scaling only stops it from dominating weight vectors where it has no business winning.
+    """
+    return PerObjectiveRewardScaler(env, linear_scale={0: 3.0, 1: 2.0, 2: 6.0})
+
+
 def water_reservoir_reward_scaler(env: gym.Env) -> IdealNadirRewardScaler:
     """Static reward normalization for water-reservoir-v0 (nO=4), using the environment's own documented
     per-step ideal/nadir reference points rather than an ad hoc per-objective scale factor.
