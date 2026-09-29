@@ -120,13 +120,69 @@ def lunar_lander_reward_scaler(env: gym.Env) -> PerObjectiveRewardScaler:
     Objectives (see mo_gymnasium's LunarLander docstring): [landing_success, shaping, main_fuel_cost,
     side_fuel_cost]. The terminal landing_success/crash reward and the cumulative shaping reward are both
     calibrated, by the original environment's design, to a +-100-ish scale (a "solved" episode totals ~200-300
-    combining the two); the two fuel-cost objectives are raw, un-scaled per-step engine power draws that
-    accumulate to a much smaller magnitude over an episode. Dividing the terminal/shaping pair by 100 and the
-    fuel-cost pair by 25 (their typical empirical episode totals) brings all four objectives to a comparable
-    O(1) scale. This is a fixed linear rescaling: it retains constant relative trade-off ratios and consistent
-    Pareto/CCS geometry across every weight in the simplex.
+    combining the two); the two fuel-cost objectives are raw, un-scaled per-step engine power draws.
+
+    All four divisors are 100. The fuel pair previously used 25, which turned out to *invert* the intended
+    priority rather than correct it: measured over random-policy episodes, the raw per-episode magnitudes are
+    already comparable --
+
+        landing_success -100      shaping -392..+126      main_fuel -85..-25      side_fuel -88..-25
+
+    -- so dividing fuel by 25 while dividing landing by 100 inflated each fuel objective to roughly 1.9x the
+    magnitude of landing success (mean |return| 1.88 and 1.91 against 1.00). That is precisely the failure mode
+    where over-weighted fuel penalties make crashing promptly look preferable to firing the engines to save the
+    lander. A common divisor keeps the four objectives in the relative proportions the environment itself
+    assigns them, while still bringing episode returns to an O(1) range -- which also keeps SAC's critic targets
+    near unit scale instead of +-100, where value regression is markedly less stable. This remains a fixed
+    linear rescaling: relative trade-off ratios and Pareto/CCS geometry are constant across the whole simplex.
     """
-    return PerObjectiveRewardScaler(env, linear_scale={0: 100.0, 1: 100.0, 2: 25.0, 3: 25.0})
+    return PerObjectiveRewardScaler(env, linear_scale={0: 100.0, 1: 100.0, 2: 100.0, 3: 100.0})
+
+
+def minecart_reward_scaler(env: gym.Env) -> PerObjectiveRewardScaler:
+    """Static reward normalization for minecart-v0, from its own known Pareto front.
+
+    Objectives: [ore_1, ore_2, fuel_cost]. Measured over the environment's analytically known Pareto front at
+    gamma=0.98, the achievable per-objective ranges are
+
+        ore_1 [0, 0.9236]      ore_2 [0, 0.9236]      fuel_cost [-1.1184, -0.2492]
+
+    i.e. spans of 0.9236 / 0.9236 / 0.8692 -- already within 6% of each other. Dividing by those spans is
+    therefore close to an identity, and is applied for explicitness: the objectives sit on a common scale by
+    construction rather than by an undocumented coincidence a future environment change could quietly break.
+
+    Deliberately linear division rather than `IdealNadirRewardScaler`, even though a known front makes ideal
+    and nadir available. Ideal/nadir normalization *shifts* as well as scales (r' = (r - ideal)/(ideal - nadir)),
+    and these references are episode-return quantities while a RewardWrapper applies per step. Every ordinary
+    step delivers no ore, so shifting would map that 0 to -1 on both ore objectives and manufacture a large
+    dense penalty out of what is genuinely a sparse reward. (Water-reservoir can use ideal/nadir safely because
+    DamEnv documents true *per-step* utopia/antiutopia references.) Pure division leaves sparse zeros at zero.
+
+    Note what this does *not* fix. Minecart's training difficulty is a reward *density* mismatch, not a
+    magnitude one: fuel is charged every step while ore is paid only on returning to base, so early training is
+    dominated by negative fuel signal however the objectives are scaled. That is what the solver's
+    random-exploration warmup (`learning_starts`) and a buffer large enough to retain early successful mining
+    episodes are for -- see environments.py.
+    """
+    return PerObjectiveRewardScaler(env, linear_scale={0: 0.9236, 1: 0.9236, 2: 0.8692})
+
+
+def highway_reward_scaler(env: gym.Env) -> PerObjectiveRewardScaler:
+    """Static reward normalization for mo-highway-fast-v0.
+
+    Objectives: [speed, right_lane, collision]. The first two are dense per-step rewards; collision is a
+    one-time -1 that also ends the episode. With `duration = 30` (the environment's own config), a
+    collision-free episode accumulates far more speed/lane reward than a crash ever costs -- measured per-step
+    rates over random rollouts are ~0.38/step speed and ~0.54/step right_lane, so a full 30-step episode earns
+    roughly +11.5 and +16.2 against a single -1.0 for crashing. Left raw, that is an order-of-magnitude
+    incentive to drive flat out and absorb frequent high-speed collisions, whatever weight a stakeholder
+    nominally places on safety.
+
+    Dividing by those full-episode accumulations puts a complete, collision-free episode at about +1.0 on each
+    dense objective, directly comparable in scale to the -1.0 collision penalty, so the stakeholder weights
+    again decide the trade-off rather than the raw magnitudes.
+    """
+    return PerObjectiveRewardScaler(env, linear_scale={0: 12.0, 1: 16.0, 2: 1.0})
 
 
 def water_reservoir_reward_scaler(env: gym.Env) -> IdealNadirRewardScaler:

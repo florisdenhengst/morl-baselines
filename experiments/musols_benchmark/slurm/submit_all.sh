@@ -5,10 +5,14 @@
 #   ./submit_all.sh               # submit everything
 #   ./submit_all.sh synthetic     # submit only the named sweep(s)
 #
-# Every sweep uses n=100 sampled stakeholder panels per configuration. Shard counts and time limits below are
-# derived from per-cell runtimes measured on a single workstation core (see README.md for the measurements and
-# the arithmetic); they include roughly a 2x safety factor, because a sweep that overruns its wall-clock limit
-# loses only the shards still running, and those can be resubmitted individually.
+# Every sweep uses n=100 sampled stakeholder panels per configuration. Each job passes an explicit
+# --timeout: a per-algorithm wall-clock cap within one cell, sized from the solver and the costs measured for
+# that environment (see README.md "Where the budgets come from"). It is set explicitly here rather than left
+# to fall back to environments.py's own EnvironmentConfig.timeout_seconds defaults, which are inconsistent
+# across environments and, for fruit-tree, were too tight to let OLS ever converge (see the fruit-tree line
+# below). Every shard's SLURM wall-clock is separately set to 120:00:00 -- the cluster's maximum -- as a
+# backstop: even in the pessimistic case where every algorithm in every cell exhausts its --timeout without
+# converging, no shard in this file comes close to that ceiling (worst case is lunar-lander's, at ~27h/shard).
 set -euo pipefail
 
 DRY_RUN=0
@@ -28,22 +32,29 @@ SEEDS="0-99"   # n=100 sampled panels per configuration
 # needs, and spending the remaining budget on more kappa values there would cost more than it reveals.
 JOBS=(
     # --- exact / synthetic: cheap, so sweep everything, and record anytime trajectories --------------------
-    "dst|1|00:30:00|0.3|--env deep-sea-treasure --seeds $SEEDS --num-users 2 3 4 --concentrations 1 5 50 --log-trajectory"
-    "resource-gathering|4|01:00:00|5.6|--env resource-gathering --seeds $SEEDS --num-users 2 3 4 --concentrations 1 5 50 --log-trajectory"
-    "fruit-tree|8|02:00:00|21|--env fruit-tree --seeds $SEEDS --num-users 2 3 4 --concentrations 1 5 50 --log-trajectory"
+    # --timeout values below are per-algorithm caps within a cell, explicit here rather than left to fall
+    # back to environments.py's own (inconsistent) EnvironmentConfig.timeout_seconds defaults -- see README.md
+    # "Where the budgets come from" for the measurements each one is based on.
+    "dst|1|120:00:00|0.3|--env deep-sea-treasure --seeds $SEEDS --num-users 2 3 4 --concentrations 1 5 50 --timeout 30 --log-trajectory"
+    "resource-gathering|4|120:00:00|5.6|--env resource-gathering --seeds $SEEDS --num-users 2 3 4 --concentrations 1 5 50 --timeout 180 --log-trajectory"
+    "fruit-tree|8|120:00:00|21|--env fruit-tree --seeds $SEEDS --num-users 2 3 4 --concentrations 1 5 50 --timeout 120 --log-trajectory"
 
     # --- the scalability grid: m in {2,3} as requested, d well past any public benchmark ------------------
     # OLS is given a 600 s budget per algorithm. It will exhaust it from about d=6 onward; that is the result,
     # not a failure, and `converged` records it. Ratios from censored cells are lower bounds -- analyze.py
     # reports the converged fraction alongside them so the two are never confused.
-    "synthetic|100|08:00:00|265|--synthetic-objectives 2 3 4 5 6 7 8 --synthetic-candidates 30 --synthetic-geometry gaussian --seeds $SEEDS --num-users 2 3 --concentrations 1 5 50 --timeout 600 --log-trajectory"
+    "synthetic|100|120:00:00|265|--synthetic-objectives 2 3 4 5 6 7 8 --synthetic-candidates 30 --synthetic-geometry gaussian --seeds $SEEDS --num-users 2 3 --concentrations 1 5 50 --timeout 600 --log-trajectory"
 
-    # --- deep RL: budgets raised to convergence-plausible values (see README.md) --------------------------
-    "minecart|16|04:00:00|440|--env minecart --seeds $SEEDS --num-users 2 3 --concentrations 5 --total-timesteps 100000 --timeout 3600"
-    "reacher|16|04:00:00|440|--env reacher --seeds $SEEDS --num-users 2 3 --concentrations 5 --total-timesteps 100000 --timeout 3600"
-    "lunar-lander|60|08:00:00|4275|--env lunar-lander --seeds $SEEDS --num-users 2 3 --concentrations 5 --total-timesteps 100000 --timeout 3600"
-    "highway|50|08:00:00|2430|--env highway --seeds $SEEDS --num-users 2 3 --concentrations 5 --total-timesteps 50000 --timeout 3600"
-    "water-reservoir|50|08:00:00|2384|--env water-reservoir --seeds $SEEDS --num-users 2 3 --concentrations 5 --total-timesteps 75000 --timeout 3600"
+    # --- deep RL: 500k-step training budgets (see README.md) ---------------------------------------------
+    # s/cell below is the old measurement scaled by the budget increase; --timeout is sized so that even the
+    # pessimistic case -- every one of the 4 algorithms in every cell of a shard exhausting its cap without
+    # converging -- stays under the 120 h shard wall-clock. Shard counts were raised where that margin got
+    # tight: worst case is now 64 h/shard (minecart, reacher), 80 h (lunar-lander, highway), 24 h (water).
+    "minecart|25|120:00:00|2200|--env minecart --seeds $SEEDS --num-users 2 3 --concentrations 5 --total-timesteps 500000 --timeout 7200"
+    "reacher|25|120:00:00|4400|--env reacher --seeds $SEEDS --num-users 2 3 --concentrations 5 --total-timesteps 500000 --timeout 7200"
+    "lunar-lander|70|120:00:00|21375|--env lunar-lander --seeds $SEEDS --num-users 2 3 --concentrations 5 --total-timesteps 500000 --timeout 25200"
+    "highway|50|120:00:00|24300|--env highway --seeds $SEEDS --num-users 2 3 --concentrations 5 --total-timesteps 500000 --timeout 18000"
+    "water-reservoir|50|120:00:00|2384|--env water-reservoir --seeds $SEEDS --num-users 2 3 --concentrations 5 --total-timesteps 75000 --timeout 5400"
 )
 
 wanted() {

@@ -14,9 +14,11 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
 import numpy as np
-from gymnasium.wrappers import FlattenObservation
+from gymnasium.wrappers import FlattenObservation, FrameStackObservation
 from reward_normalization import (
+    highway_reward_scaler,
     lunar_lander_reward_scaler,
+    minecart_reward_scaler,
     water_reservoir_reward_scaler,
 )
 
@@ -182,10 +184,18 @@ _register(
         ),
         solver="discrete_sac",
         solver_kwargs={
-            "total_timesteps": 100_000,
+            "total_timesteps": 500_000,
             "net_arch": [64, 64],
-            "learning_starts": 1_000,
+            # Minecart charges fuel densely every step but pays ore only on returning to base. Without a
+            # substantial pure-random warmup, SAC sees almost nothing but early negative fuel reward and
+            # collapses onto "do as little as possible" before it has ever observed a completed mine-and-return
+            # episode. 10k steps of uniform action sampling first makes such an episode likely to be in the
+            # buffer at all by the time learning starts.
+            "learning_starts": 10_000,
             "batch_size": 128,
+            # Large enough that those rare early successful mining episodes are still sampleable late in the
+            # run rather than having been evicted by a long tail of unsuccessful ones.
+            "buffer_size": 500_000,
         },
         epsilon=0.05,
         timeout_seconds=3600.0,
@@ -194,10 +204,11 @@ _register(
             "demands against a shared fuel budget. Widely used MORL benchmark with a known Pareto front. "
             "Trains a real discrete-action SAC policy per candidate weight."
         ),
-        # No reward normalization: on the environment's own known Pareto front the three objectives span
-        # comparable ranges ([0.92, 0.92, 0.87], ratio 1.1), so the raw scales are already commensurate.
-        # (Random-policy returns look wildly imbalanced only because a random agent never completes the
-        # sparse mine-and-return task; achievable ranges, not random rollouts, are the right reference.)
+        # Normalized against the environment's own known Pareto front. The achievable spans are already within
+        # 6% of each other, so this is near-identity in magnitude -- it is applied so the common scale is
+        # explicit and checked rather than incidental. See reward_normalization.py, which also explains why
+        # this does not by itself address minecart's real difficulty (reward *density*, not magnitude).
+        reward_wrapper=minecart_reward_scaler,
     )
 )
 
@@ -227,10 +238,18 @@ _register(
         ),
         solver="discrete_sac",
         solver_kwargs={
-            "total_timesteps": 50_000,
+            "total_timesteps": 500_000,
             "net_arch": [64, 64],
-            "learning_starts": 1_000,
+            "learning_starts": 5_000,
             "batch_size": 128,
+            "buffer_size": 500_000,
+            # Collisions end episodes immediately, so aggressive early exploration fills the buffer with very
+            # short crash trajectories and little else. MOSACDiscrete's autotuned entropy coefficient starts at
+            # exp(0) = 1.0 -- near-uniform lane swapping -- and the `alpha` argument is ignored while autotune
+            # is on (see solvers.py). Disabling autotune is therefore the only way to actually start
+            # conservative, at an entropy weight low enough that the policy follows its Q-values early on.
+            "autotune": False,
+            "alpha": 0.05,
         },
         epsilon=0.05,
         timeout_seconds=1800.0,
@@ -239,8 +258,16 @@ _register(
             "preference for speed against a fleet operator's preference for lane discipline and collision "
             "avoidance. Trains a real discrete-action SAC policy per candidate weight."
         ),
-        # highway-env emits a (5, 5) kinematics matrix; flatten it so the solver sees a plain feature vector.
-        observation_wrapper=FlattenObservation,
+        # Stack 4 consecutive kinematics frames before flattening: a single (5, 5) frame gives absolute vehicle
+        # positions with no history, so relative velocities -- the quantity that actually decides whether a gap
+        # is closing -- have to be inferred from one snapshot. Stacking makes them directly observable and is
+        # standard practice for this benchmark. The result is a (4, 5, 5) tensor, flattened to 100 features.
+        observation_wrapper=lambda env: FlattenObservation(FrameStackObservation(env, stack_size=4)),
+        # Speed and right-lane are dense per-step rewards; collision is a one-time -1. Over the environment's
+        # 30-step episode the dense pair outruns the collision penalty by an order of magnitude, so without
+        # rescaling SAC learns to drive flat out and absorb crashes whatever weight safety is given. See
+        # reward_normalization.py for the measured per-step rates behind the divisors.
+        reward_wrapper=highway_reward_scaler,
     )
 )
 
@@ -250,7 +277,9 @@ _register(
         env_id="mo-reacher-v5",
         env_kwargs={},
         num_objectives=4,
-        gamma=0.99,
+        # Reacher episodes reset after ~50 steps, so there is no long horizon to discount for; 0.98 gives an
+        # effective horizon that matches the episode rather than reaching well past its end as 0.99 does.
+        gamma=0.98,
         objective_names=["target_1", "target_2", "target_3", "target_4"],
         stakeholder_names=["operator A", "operator B"],
         # Four competing targets for one arm: two operators each own a different pair of targets, so neither
@@ -267,10 +296,13 @@ _register(
         ),
         solver="discrete_sac",
         solver_kwargs={
-            "total_timesteps": 50_000,
+            "total_timesteps": 500_000,
             "net_arch": [64, 64],
             "learning_starts": 1_000,
             "batch_size": 128,
+            # The state-action space here is small and episodes are short, so 100k transitions already covers
+            # a wide range of arm configurations; a larger buffer would only add memory, not diversity.
+            "buffer_size": 100_000,
         },
         epsilon=0.05,
         timeout_seconds=1800.0,
@@ -358,10 +390,15 @@ _register(
         ),
         solver="sac",
         solver_kwargs={
-            "total_timesteps": 8_000,
+            "total_timesteps": 500_000,
             "net_arch": [64, 64],
-            "learning_starts": 256,
+            # Early on, fuel penalties and crash rewards are all the agent sees, and SAC will happily collapse
+            # onto cutting the engines and falling passively -- locally the cheapest option -- before it has
+            # ever seen a successful landing. 10k steps of pure random action sampling first makes soft
+            # landings present in the buffer when learning begins.
+            "learning_starts": 10_000,
             "batch_size": 128,
+            "buffer_size": 500_000,
         },
         epsilon=0.05,
         timeout_seconds=900.0,
@@ -370,10 +407,10 @@ _register(
             "balances a safety officer's and a fuel/operations manager's differing priorities between landing "
             "safely and conserving fuel. Trains a real continuous-control SAC policy per candidate weight."
         ),
-        # Terminal landing/crash reward and cumulative shaping reward are both on a ~100 scale by the
-        # environment's design; fuel costs are raw per-step engine draws accumulating to a much smaller
-        # magnitude. Static division brings all four objectives to a comparable scale (see
-        # reward_normalization.py).
+        # All four objectives are divided by 100, bringing episode returns to an O(1) range while keeping the
+        # relative proportions the environment itself assigns them. The fuel pair previously used a divisor of
+        # 25, which inflated fuel to ~1.9x the magnitude of landing success and so made crashing promptly look
+        # better than firing the engines -- see reward_normalization.py for the measured returns behind this.
         reward_wrapper=lunar_lander_reward_scaler,
     )
 )

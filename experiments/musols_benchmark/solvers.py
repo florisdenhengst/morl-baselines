@@ -89,6 +89,9 @@ class ContinuousSACSolver:
         net_arch=(64, 64),
         learning_starts: int = 256,
         batch_size: int = 128,
+        buffer_size: int = None,
+        alpha: float = 0.2,
+        autotune: bool = True,
     ):
         self.env = env
         self.gamma = gamma
@@ -97,6 +100,11 @@ class ContinuousSACSolver:
         self.net_arch = list(net_arch)
         self.learning_starts = learning_starts
         self.batch_size = batch_size
+        # MOSAC preallocates the whole buffer eagerly, so sizing it to the run rather than leaving it at the
+        # 1e6 default avoids reserving memory for transitions this run can never collect.
+        self.buffer_size = int(buffer_size) if buffer_size is not None else min(total_timesteps, 1_000_000)
+        self.alpha = alpha
+        self.autotune = autotune
         self._num_solved = 0
 
     def solve(self, w: np.ndarray) -> np.ndarray:
@@ -107,6 +115,9 @@ class ContinuousSACSolver:
             net_arch=self.net_arch,
             learning_starts=self.learning_starts,
             batch_size=self.batch_size,
+            buffer_size=self.buffer_size,
+            alpha=self.alpha,
+            autotune=self.autotune,
             seed=self.seed + self._num_solved,
             log=False,
         )
@@ -136,6 +147,9 @@ class DiscreteSACSolver:
         batch_size: int = 128,
         update_frequency: int = 4,
         target_net_freq: int = 200,
+        buffer_size: int = None,
+        alpha: float = 0.2,
+        autotune: bool = True,
     ):
         self.env = env
         self.gamma = gamma
@@ -144,6 +158,14 @@ class DiscreteSACSolver:
         self.net_arch = list(net_arch)
         self.learning_starts = learning_starts
         self.batch_size = batch_size
+        # MOSACDiscrete preallocates the whole buffer eagerly; size it to the run unless told otherwise.
+        self.buffer_size = int(buffer_size) if buffer_size is not None else min(total_timesteps, 1_000_000)
+        # NOTE: MOSACDiscrete ignores `alpha` whenever `autotune` is True -- it initializes log_alpha to zeros,
+        # so the entropy coefficient *starts at exp(0) = 1.0* regardless of what is passed here. Setting a
+        # deliberately conservative initial alpha therefore requires autotune=False (see environments.py's
+        # highway config, where an alpha of 1.0 means near-uniform random lane changes early in training).
+        self.alpha = alpha
+        self.autotune = autotune
         self.update_frequency = update_frequency
         # MOSACDiscrete asserts this divisibility; check here so a bad config fails at construction with a
         # clear message rather than deep inside the first training run.
@@ -161,6 +183,9 @@ class DiscreteSACSolver:
             batch_size=self.batch_size,
             update_frequency=self.update_frequency,
             target_net_freq=self.target_net_freq,
+            buffer_size=self.buffer_size,
+            alpha=self.alpha,
+            autotune=self.autotune,
             seed=self.seed + self._num_solved,
             log=False,
         )
