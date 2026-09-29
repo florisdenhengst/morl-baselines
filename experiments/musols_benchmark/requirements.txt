@@ -1,0 +1,29 @@
+# Pinned environment for the MUSOLS study, as verified on the machine that produced results/.
+# Recreate on a cluster with:
+#   conda create -n morl_bl_musols python=3.12 -y && conda activate morl_bl_musols
+#   pip install -r experiments/musols_benchmark/requirements.txt
+#   pip install -e .
+#
+# Two installs are order-sensitive and worth knowing about before they fail on a login node:
+#   * pycddlib builds against the native cddlib headers. If the wheel does not cover your platform, install
+#     cddlib first (`conda install -c conda-forge cddlib pycddlib`) rather than fighting the source build.
+#   * Box2D needs swig present at build time, which is why swig is pinned here and listed before it.
+#
+# mujoco and highway-env are needed only for the reacher and highway environments respectively; drop them if
+# you are not running those sweeps.
+
+numpy==2.5.2
+scipy==1.18.0
+torch==2.13.0
+cvxpy==1.9.2
+pycddlib==2.1.6
+pymoo==0.6.2
+gymnasium==1.3.0
+mo-gymnasium==1.3.2
+swig==4.5.0
+Box2D==2.3.10
+mujoco==3.14.0
+highway-env==1.12.1
+pygame==2.6.1
+wandb==0.28.2
+pytest==9.1.1
