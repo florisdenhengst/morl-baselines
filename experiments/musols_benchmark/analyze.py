@@ -51,8 +51,14 @@ def parse_args():
         "--group-by",
         type=str,
         nargs="+",
-        default=["env"],
-        help="Record fields to group rows by (e.g. env num_users concentration).",
+        default=["env", "concentration"],
+        help=(
+            "Record fields to group rows by. Defaults to env and concentration: stakeholder heterogeneity "
+            "changes the achievable restricted coverage set substantially (at d=4 the median |CCS_W| is 2 at "
+            "kappa=1 but 1 at kappa=5, and 72% of kappa=50 panels admit a single policy), so pooling the "
+            "kappa levels averages over qualitatively different regimes. Add num_users to split by panel size "
+            "too, or pass just `env` to pool everything."
+        ),
     )
     parser.add_argument("--latex", action="store_true", help="Emit LaTeX tabular rows instead of markdown.")
     parser.add_argument(
@@ -145,21 +151,34 @@ def summarize(records: List[dict], group_by: Sequence[str], latex: bool) -> None
                 print("| " + " | ".join(str(c) for c in row) + " |")
 
 
-def significance_table(records: List[dict], baseline: str) -> None:
-    """Prints paired Wilcoxon p-values for every other algorithm against the baseline, per environment."""
-    envs = sorted({r["env"] for r in records})
+def significance_table(records: List[dict], baseline: str, group_by: Sequence[str]) -> None:
+    """Prints paired Wilcoxon p-values against the baseline, grouped exactly as the summary tables are.
+
+    Grouping matters here rather than being cosmetic: pooling stakeholder-heterogeneity levels tests a mixture
+    of regimes in which the achievable restricted coverage set differs in size, so a pooled p-value can be
+    driven by whichever level happens to contribute most cells. Using the same grouping as `summarize` also
+    means every p-value below corresponds to exactly one summary block above it.
+    """
+    groups: Dict[tuple, List[dict]] = defaultdict(list)
+    for record in records:
+        groups[tuple(record[k] for k in group_by)].append(record)
+
     others = [a for a in ALGORITHM_ORDER if a != baseline]
     print(f"\n### Paired Wilcoxon signed-rank vs {baseline} (p-values; '-' = untestable or identical)")
-    print("| env | comparison | " + " | ".join(label for _, label, _ in METRICS) + " |")
-    print("|" + "|".join("---" for _ in range(2 + len(METRICS))) + "|")
-    for env in envs:
-        block = [r for r in records if r["env"] == env]
+    header = list(group_by) + ["n", "comparison"] + [label for _, label, _ in METRICS]
+    print("| " + " | ".join(header) + " |")
+    print("|" + "|".join("---" for _ in header) + "|")
+
+    for key in sorted(groups, key=lambda k: tuple(str(v) for v in k)):
+        block = groups[key]
+        n_cells = len({tuple(r[k] for k in CELL_KEYS) for r in block})
         present = {r["algorithm"] for r in block}
         for algorithm in others:
             if algorithm not in present:
                 continue
             cells = [significance(block, baseline, algorithm, metric) for metric, _, _ in METRICS]
-            print(f"| {env} | {baseline} vs {algorithm} | " + " | ".join(cells) + " |")
+            label = " | ".join(str(v) for v in key)
+            print(f"| {label} | {n_cells} | {baseline} vs {algorithm} | " + " | ".join(cells) + " |")
 
 
 def main():
@@ -171,7 +190,7 @@ def main():
     print(f"Loaded {len(records)} records from {len(args.results)} file(s).")
     print(f"Environments: {sorted({r['env'] for r in records})}")
     summarize(records, args.group_by, args.latex)
-    significance_table(records, args.baseline)
+    significance_table(records, args.baseline, args.group_by)
 
 
 if __name__ == "__main__":
