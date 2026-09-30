@@ -5,6 +5,8 @@ from copy import deepcopy
 from typing import List, Optional
 
 import cvxpy as cp
+from fractions import Fraction
+
 import numpy as np
 from cvxpy import SolverError
 from gymnasium.core import Env
@@ -322,14 +324,12 @@ class LinearSupport:
         b[len(self.ccs)] = 1
         b[len(self.ccs) + 1] = -1
 
-        def compute_poly_vertices(A, b):
-            # Based on https://stackoverflow.com/questions/65343771/solve-linear-inequalities
-            b = b.reshape((b.shape[0], 1))
-            mat = cdd.Matrix(np.hstack([b, -A]), number_type="float")
+        def _vertices_from(rows, number_type):
+            mat = cdd.Matrix(rows, number_type=number_type)
             mat.rep_type = cdd.RepType.INEQUALITY
             P = cdd.Polyhedron(mat)
             g = P.get_generators()
-            V = np.array(g)
+            V = np.array(g, dtype=float)
             vertices = []
             for i in range(V.shape[0]):
                 if V[i, 0] != 1:
@@ -337,6 +337,27 @@ class LinearSupport:
                 if i not in g.lin_set:
                     vertices.append(V[i, 1:])
             return vertices
+
+        def compute_poly_vertices(A, b):
+            # Based on https://stackoverflow.com/questions/65343771/solve-linear-inequalities
+            b = b.reshape((b.shape[0], 1))
+            rows = np.hstack([b, -A])
+            try:
+                return _vertices_from(rows, "float")
+            except RuntimeError:
+                # cddlib's double-description method is run in floating point for speed, but on a degenerate
+                # polytope -- near-parallel or redundant constraints, which arise when the coverage set holds
+                # payoffs that are equal to within the rounding applied above -- it aborts with "Numerical
+                # inconsistency is found. Use the GMP exact arithmetic." Retrying in exact rational arithmetic
+                # is the remedy cddlib itself prescribes, and it returns identical vertices on inputs the
+                # float path handles. It is only reached on the rare degenerate case, so the usual cost is one
+                # failed attempt rather than exact arithmetic throughout.
+                #
+                # A is rounded to 4 decimals before this point, so limiting denominators to 1e6 is lossless
+                # here while keeping cddlib away from the enormous denominators an exact float conversion
+                # would produce.
+                rational = [[Fraction(value).limit_denominator(10**6) for value in row] for row in rows]
+                return _vertices_from(rational, "fraction")
 
         vertices = compute_poly_vertices(A, b)
         corners = []

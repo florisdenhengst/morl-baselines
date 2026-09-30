@@ -27,11 +27,21 @@ import numpy as np
 from scipy.stats import wilcoxon
 
 
-ALGORITHMS = ("musols", "random", "vertex", "ols")
+# Ordered so the table builds up to the proposed method: naive baseline, undirected baseline, the
+# unrestricted algorithm MUSOLS specialises, then MUSOLS itself.
+ALGORITHMS = ("vertex", "random", "ols", "musols")
 PRETTY = {"musols": "MUSOLS", "random": "Random-$\\Omega_W$", "vertex": "Vertex-only", "ols": "OLS"}
 PRETTY_MD = {"musols": "MUSOLS", "random": "Random-Ω_W", "vertex": "Vertex-only", "ols": "OLS"}
 CELL_KEYS = ("env", "seed", "num_users", "concentration")
-WELL_POWERED = ("deep-sea-treasure", "fruit-tree", "resource-gathering", "synthetic-d2", "synthetic-d3", "synthetic-d4")
+# Environments are split by how much evidence they carry, measured from the records rather than listed by
+# name: a hardcoded list silently misfiled synthetic-d5..d8 (600 cells each, ground-truth utility loss) as
+# "indicative", and would have done the same to every newly added environment.
+# Environments with this many cells or fewer are excluded from the assets entirely rather than reported in a
+# separate "indicative" table: at that sample size no comparison is resolvable, and publishing the rows invites
+# them to be read as results.
+MIN_CELLS = 100
+# The headline table; every other heterogeneity level present gets its own auxiliary table.
+MAIN_CONCENTRATION = 5.0
 
 
 def parse_args():
@@ -61,13 +71,157 @@ def _fmt(value: float, digits: int = 3) -> str:
     return f"{value:.{digits}g}"
 
 
-def _median_iqr(values: Sequence[float]) -> str:
-    """Median with interquartile range; the skew in these quantities makes mean/sd misleading."""
-    arr = np.asarray([v for v in values if v is not None and not np.isnan(v)], dtype=float)
+def _clean(values: Sequence[float]) -> np.ndarray:
+    return np.asarray([v for v in values if v is not None and not np.isnan(v)], dtype=float)
+
+
+def _median_bootstrap_ci(values: Sequence[float], resamples: int = 10_000, seed: int = 0):
+    """Median with a percentile bootstrap 95% CI. Used for wall-clock time.
+
+    Runtimes here are heavily right-skewed and, for OLS, truncated at the per-algorithm timeout, so a mean is
+    not an estimate of any quantity of interest -- it is dragged by the tail and capped from above at the same
+    time. The median is unaffected by either, and bootstrapping gives it an interval without assuming a shape.
+    """
+    arr = _clean(values)
     if arr.size == 0:
+        return None, None, None
+    point = float(np.median(arr))
+    if arr.size == 1:
+        return point, point, point
+    rng = np.random.default_rng(seed)
+    draws = rng.choice(arr, size=(resamples, arr.size), replace=True)
+    lo, hi = np.percentile(np.median(draws, axis=1), [2.5, 97.5])
+    return point, float(lo), float(hi)
+
+
+def _mean_bootstrap_ci(values: Sequence[float], resamples: int = 10_000, seed: int = 0):
+    """Mean with a percentile bootstrap 95% CI.
+
+    Used for quantities bounded below at zero that pile up *on* that bound -- delta-EU is exactly 0 whenever an
+    algorithm is the best in its cell, which is most cells for MUSOLS and OLS. A normal-approximation interval
+    on such a sample happily returns a negative lower bound, which is impossible by construction. Every
+    bootstrap resample is drawn from the observed non-negative values, so the interval cannot leave the
+    support.
+    """
+    arr = _clean(values)
+    if arr.size == 0:
+        return None, None, None
+    point = float(arr.mean())
+    if arr.size < 2:
+        return point, point, point
+    rng = np.random.default_rng(seed)
+    draws = rng.choice(arr, size=(resamples, arr.size), replace=True)
+    lo, hi = np.percentile(draws.mean(axis=1), [2.5, 97.5])
+    return point, float(lo), float(hi)
+
+
+def _mean_ci(values: Sequence[float]):
+    """Mean with a normal-approximation 95% CI, for the bounded count and utility metrics."""
+    arr = _clean(values)
+    if arr.size == 0:
+        return None, None, None
+    point = float(arr.mean())
+    if arr.size < 2:
+        return point, point, point
+    half = 1.96 * float(arr.std(ddof=1)) / np.sqrt(arr.size)
+    return point, point - half, point + half
+
+
+def _stat(values: Sequence[float], kind: str):
+    """Point estimate and 95% interval for one metric.
+
+    "median_boot" bootstraps the median (wall-clock time: skewed and censored at the budget), "mean_boot"
+    bootstraps the mean (delta-EU: bounded below at 0 with mass on the bound), "mean" is the normal
+    approximation (counts, which are neither).
+    """
+    if kind == "median_boot":
+        return _median_bootstrap_ci(values)
+    if kind == "mean_boot":
+        return _mean_bootstrap_ci(values)
+    return _mean_ci(values)
+
+
+def _fmt_stat(point, lo, hi, bold: bool = False) -> str:
+    if point is None:
         return "--"
-    q25, q75 = np.percentile(arr, [25, 75])
-    return f"{_fmt(float(np.median(arr)))} [{_fmt(float(q25))}, {_fmt(float(q75))}]"
+    body = f"{_fmt(point)} [{_fmt(lo)}, {_fmt(hi)}]"
+    return f"\\textbf{{{_fmt(point)}}} [{_fmt(lo)}, {_fmt(hi)}]" if bold else body
+
+
+def _fmt_stat_md(point, lo, hi, bold: bool = False) -> str:
+    if point is None:
+        return "--"
+    head = f"**{_fmt(point)}**" if bold else _fmt(point)
+    return f"{head} [{_fmt(lo)}, {_fmt(hi)}]"
+
+
+# Metrics reported in the main table. `higher_better` drives which end counts as best for boldface;
+# `kind` picks the interval; ccs/evals/time are costs, delta-EU and MUL are quality.
+TABLE_METRICS = (
+    ("ccs_size", "$|\\mathcal{C}_W|$", "|CCS|", False, "mean"),
+    ("num_evaluated", "Evals.", "evals", False, "mean"),
+    ("elapsed_seconds", "Time (s)", "time(s)", False, "median_boot"),
+    ("delta_eu", "$\\Delta$EU $\\downarrow$", "dEU", False, "mean_boot"),
+    ("max_consensus_utility_loss", "MUL $\\downarrow$", "MUL", False, "mean"),
+)
+
+
+def _attach_delta_eu(records: List[dict]) -> None:
+    """Adds `delta_eu`: expected consensus utility shortfall against the best algorithm *in the same cell*.
+
+    Absolute EU is nearly identical between MUSOLS and OLS -- which is the result, not a defect -- but that
+    makes the column hard to read and invites comparing values across environments, where EU is not on a
+    common scale. Reporting the within-cell gap from the best keeps the "no quality loss" evidence (a gap of
+    0 means nothing was given up) while making ties legible and the metric comparable across environments.
+    """
+    for cell in _by_cell(records).values():
+        best = max(
+            (r["expected_consensus_utility"] for r in cell.values()
+             if r.get("expected_consensus_utility") is not None),
+            default=None,
+        )
+        for record in cell.values():
+            eu = record.get("expected_consensus_utility")
+            record["delta_eu"] = None if (eu is None or best is None) else best - eu
+
+
+def _bold_set(block: List[dict], metric: str, higher_better: bool, alpha: float = 0.05) -> set:
+    """Algorithms to embolden: the best point estimate, plus any not significantly worse than it.
+
+    Paired Wilcoxon within cells, so the comparison respects that every algorithm saw the same panel. Showing
+    ties as ties is the point -- MUSOLS matching OLS on quality is a claim, and a rule that bolded a single
+    winner would hide exactly that.
+    """
+    present = [a for a in ALGORITHMS if any(r["algorithm"] == a for r in block)]
+    points = {}
+    for algorithm in present:
+        values = _clean([r.get(metric) for r in block if r["algorithm"] == algorithm])
+        if values.size:
+            points[algorithm] = float(values.mean() if metric != "elapsed_seconds" else np.median(values))
+    if not points:
+        return set()
+    best = max(points, key=points.get) if higher_better else min(points, key=points.get)
+    bold = {best}
+    cells = _by_cell(block)
+    for algorithm in points:
+        if algorithm == best:
+            continue
+        pairs = [
+            (c[best][metric], c[algorithm][metric])
+            for c in cells.values()
+            if best in c and algorithm in c
+            and c[best].get(metric) is not None and c[algorithm].get(metric) is not None
+        ]
+        diffs = [a - b for a, b in pairs]
+        if len(diffs) < 2 or all(abs(d) < 1e-12 for d in diffs):
+            bold.add(algorithm)      # identical to the best: a tie
+            continue
+        try:
+            if wilcoxon([a for a, _ in pairs], [b for _, b in pairs]).pvalue >= alpha:
+                bold.add(algorithm)  # not significantly worse
+        except ValueError:
+            bold.add(algorithm)
+    return bold
 
 
 def _by_cell(records: List[dict]) -> Dict[tuple, Dict[str, dict]]:
@@ -81,65 +235,60 @@ def _by_cell(records: List[dict]) -> Dict[tuple, Dict[str, dict]]:
 # --------------------------------------------------------------------------------------- main results table
 
 
-def main_results_rows(records: List[dict], envs: Sequence[str]) -> List[List[str]]:
-    """Builds the per-environment, per-algorithm summary rows shared by the markdown and LaTeX tables."""
+def main_results_rows(records: List[dict], envs: Sequence[str], markdown: bool = False) -> List[List[str]]:
+    """Per-environment, per-algorithm rows with 95% intervals and significance-aware boldface."""
+    fmt = _fmt_stat_md if markdown else _fmt_stat
     rows = []
     for env in envs:
         block = [r for r in records if r["env"] == env]
         if not block:
             continue
         n_cells = len({tuple(r[k] for k in CELL_KEYS) for r in block})
+        bold = {m: _bold_set(block, m, hi) for m, _, _, hi, _ in TABLE_METRICS}
         for index, algorithm in enumerate(ALGORITHMS):
             subset = [r for r in block if r["algorithm"] == algorithm]
             if not subset:
                 continue
-            rows.append(
-                [
-                    f"{env} (n={n_cells})" if index == 0 else "",
-                    algorithm,
-                    _median_iqr([r["ccs_size"] for r in subset]),
-                    _median_iqr([r["num_evaluated"] for r in subset]),
-                    _median_iqr([r["elapsed_seconds"] for r in subset]),
-                    _median_iqr([r["expected_consensus_utility"] for r in subset]),
-                    _median_iqr([r["max_consensus_utility_loss"] for r in subset]),
-                ]
-            )
+            cells = []
+            for metric, _, _, _, kind in TABLE_METRICS:
+                point, lo, hi = _stat([r.get(metric) for r in subset], kind)
+                cells.append(fmt(point, lo, hi, bold=algorithm in bold[metric]))
+            rows.append([f"{env} (n={n_cells})" if index == 0 else "", algorithm] + cells)
     return rows
 
 
 def write_main_table(records: List[dict], envs: Sequence[str], out: Path, name: str, caption: str, label: str) -> str:
     """Writes the LaTeX main-results table and returns its markdown twin."""
-    rows = main_results_rows(records, envs)
-    headers = ["Environment", "Algorithm", "|CCS|", "Evaluations", "Time (s)", "EU", "MUL"]
-
+    latex_head = " & ".join(["Environment", "Algorithm"] + [tex for _, tex, _, _, _ in TABLE_METRICS])
     latex = [
         "% Requires: \\usepackage{booktabs}",
         "\\begin{table}[t]",
         "\\centering",
         "\\small",
-        "\\begin{tabular}{llrrrrr}",
+        "\\begin{tabular}{ll" + "r" * len(TABLE_METRICS) + "}",
         "\\toprule",
-        "Environment & Algorithm & $|\\mathcal{C}_W|$ & Evals. & Time (s) & EU $\\uparrow$ & MUL $\\downarrow$ \\\\",
+        latex_head + " \\\\",
         "\\midrule",
     ]
     previous_env = None
-    for row in rows:
+    for row in main_results_rows(records, envs):
         if row[0] and previous_env is not None:
             latex.append("\\midrule")
         previous_env = row[0] or previous_env
         env_cell = row[0].replace("_", "\\_") if row[0] else ""
-        cells = [env_cell, PRETTY[row[1]]] + [c.replace("[", "{\\scriptsize [").replace("]", "]}") for c in row[2:]]
+        cells = [env_cell, PRETTY[row[1]]] + [
+            c.replace("[", "{\\scriptsize [").replace("]", "]}") for c in row[2:]
+        ]
         latex.append(" & ".join(cells) + " \\\\")
-    latex += ["\\bottomrule", "\\end{tabular}", f"\\caption{{{caption}}}", f"\\label{{{label}}}", "\\end{table}", ""]
+    latex += ["\\bottomrule", "\\end{tabular}", f"\\caption{{{caption}}}", f"\\label{{{label}}}",
+              "\\end{table}", ""]
     (out / f"{name}.tex").write_text("\n".join(latex))
 
-    markdown = ["| " + " | ".join(headers) + " |", "|" + "|".join("---" for _ in headers) + "|"]
-    for row in rows:
-        markdown.append("| " + " | ".join([row[0], PRETTY_MD[row[1]]] + row[2:]) + " |")
-    return "\n".join(markdown)
-
-
-# ------------------------------------------------------------------------------------------- scaling table
+    headers = ["Environment", "Algorithm"] + [md for _, _, md, _, _ in TABLE_METRICS]
+    lines = ["| " + " | ".join(headers) + " |", "|" + "|".join("---" for _ in headers) + "|"]
+    for row in main_results_rows(records, envs, markdown=True):
+        lines.append("| " + " | ".join([row[0], PRETTY_MD[row[1]]] + row[2:]) + " |")
+    return "\n".join(lines)
 
 
 def scaling_ratios(records: List[dict]) -> Dict[int, Dict[str, float]]:
@@ -154,6 +303,26 @@ def scaling_ratios(records: List[dict]) -> Dict[int, Dict[str, float]]:
         per_d[d]["evals"].append(ols["num_evaluated"] / max(musols["num_evaluated"], 1))
         per_d[d]["ccs"].append(ols["ccs_size"] / max(musols["ccs_size"], 1))
     return {d: {k: float(np.median(v)) for k, v in metrics.items()} for d, metrics in sorted(per_d.items())}
+
+
+def _synthetic_shape(records: List[dict]) -> str:
+    """Describes the synthetic task's own shape from the records, rather than hardcoding it in a caption.
+
+    The candidate count and geometry are sweep parameters that have changed during development (sphere
+    geometry with N=20 early on, gaussian with N=30 later), so a caption asserting either is a latent error
+    waiting for the next re-run. Older records predate `env_kwargs` being stored; those fall back to a
+    parameter-free description rather than claiming something unverifiable.
+    """
+    shapes = {
+        (r.get("env_kwargs") or {}).get("num_candidates"): (r.get("env_kwargs") or {}).get("geometry")
+        for r in records
+        if str(r.get("env", "")).startswith("synthetic")
+    }
+    shapes.pop(None, None)
+    if len(shapes) == 1:
+        n, geometry = next(iter(shapes.items()))
+        return f"$N={n}$ attainable payoffs, {geometry} geometry"
+    return "see Section~\\ref{sec:setup} for the task parameters"
 
 
 def write_scaling_table(records: List[dict], out: Path) -> str:
@@ -177,8 +346,8 @@ def write_scaling_table(records: List[dict], out: Path) -> str:
     latex += [
         "\\bottomrule",
         "\\end{tabular}",
-        "\\caption{Cost of OLS relative to MUSOLS on the synthetic task ($N=20$ attainable payoffs, sphere "
-        "geometry), median over cells. The wall-clock ratio grows superlinearly in the number of objectives, "
+        f"\\caption{{Cost of OLS relative to MUSOLS on the synthetic task ({_synthetic_shape(records)}), "
+        "median over cells. The wall-clock ratio grows superlinearly in the number of objectives, "
         "while the returned set stays an order of magnitude larger.}",
         "\\label{tab:scaling}",
         "\\end{table}",
@@ -283,8 +452,8 @@ def write_scaling_figure(records: List[dict], out: Path) -> None:
         "\\end{axis}",
         "\\end{tikzpicture}",
         "\\caption{MUSOLS's advantage over OLS grows superlinearly in the number of objectives. Synthetic "
-        "single-decision MOMDP with $N=20$ attainable payoffs in sphere geometry, so that $|\\mathcal{C}|=N$ "
-        "by construction; median over cells, log-scaled ordinate.}",
+        f"single-decision MOMDP ({_synthetic_shape(records)}), "
+        "median over cells, log-scaled ordinate.}",
         "\\label{fig:scaling}",
         "\\end{figure}",
         "",
@@ -346,9 +515,16 @@ def write_anytime_figure(records: List[dict], env: str, out: Path, name: str, ho
     (out / f"{name}.tex").write_text("\n".join(lines))
 
 
-def write_heterogeneity_figure(records: List[dict], out: Path) -> None:
-    """Emits the effect of stakeholder agreement on the size of the returned restricted coverage set."""
-    envs = [e for e in WELL_POWERED if not e.startswith("synthetic")]
+def write_heterogeneity_figure(records: List[dict], out: Path, envs: Sequence[str] = ()) -> None:
+    """Emits the effect of stakeholder agreement on the size of the returned restricted coverage set.
+
+    Takes the environment list from the caller, which derives it from cell counts, rather than consulting a
+    hardcoded roster. Synthetic tasks are excluded because their heterogeneity response is already covered by
+    the scaling figure, and including seven of them would swamp the real environments.
+    """
+    envs = [e for e in envs if not e.startswith("synthetic")]
+    if not envs:
+        return
     per_env = defaultdict(dict)
     for record in records:
         if record["env"] not in envs or record["algorithm"] != "musols":
@@ -395,58 +571,81 @@ def main():
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
-    present = {r["env"] for r in records}
-    well_powered = [e for e in WELL_POWERED if e in present]
-    indicative = sorted(e for e in present if e not in WELL_POWERED)
+    _attach_delta_eu(records)
 
-    print("=" * 100)
-    print("TABLE 1 -- Main results, well-powered environments")
-    print("=" * 100)
-    print(
-        write_main_table(
-            records,
-            well_powered,
-            out,
-            "main_results_table",
-            "Main results on the exact-solver and synthetic environments, where every configuration has tens "
-            "of cells and utility loss is measured against a brute-forced ground-truth restricted CCS. "
-            "Median [interquartile range]. EU is expected consensus utility (higher is better), MUL is "
-            "maximum consensus utility loss (lower is better).",
-            "tab:main",
+    def cell_counts(subset):
+        per_env = defaultdict(set)
+        for record in subset:
+            per_env[record["env"]].add(tuple(record[k] for k in CELL_KEYS))
+        return {env: len(cs) for env, cs in per_env.items()}
+
+    kappas = sorted({r["concentration"] for r in records if r.get("concentration") is not None})
+    if MAIN_CONCENTRATION in kappas:
+        kappas = [MAIN_CONCENTRATION] + [k for k in kappas if k != MAIN_CONCENTRATION]
+    else:
+        print(f"WARNING: no records at kappa={MAIN_CONCENTRATION:g}; reporting the levels that are present.")
+
+    dropped_any = {}
+    for position, kappa in enumerate(kappas):
+        subset = [r for r in records if r.get("concentration") == kappa]
+        counts = cell_counts(subset)
+        envs = sorted(e for e, n in counts.items() if n > MIN_CELLS)
+        dropped = {e: n for e, n in counts.items() if n <= MIN_CELLS}
+        dropped_any.update(dropped)
+
+        headline = position == 0
+        name = "main_results_table" if headline else f"main_results_table_k{kappa:g}"
+        label = "tab:main" if headline else f"tab:main-k{kappa:g}"
+        role = "Main results" if headline else "Auxiliary results"
+        heading = f"TABLE {position + 1} -- {role} at kappa={kappa:g}"
+
+        print("\n" + "=" * 100)
+        print(heading)
+        print("=" * 100)
+        if not envs:
+            print(f"(no environment has more than {MIN_CELLS} cells at kappa={kappa:g}; nothing written)")
+            continue
+        print(f"environments: " + ", ".join(f"{e}({counts[e]})" for e in envs))
+        caption = (
+            f"{role} at stakeholder heterogeneity $\\kappa={kappa:g}$. Only environments with more than "
+            f"{MIN_CELLS} sampled stakeholder panels are reported. Wall-clock time is the median with a "
+            "percentile bootstrap 95\\% CI, since runtimes are right-skewed and censored at the per-algorithm "
+            "budget; $\\Delta$EU likewise uses a bootstrap, being bounded below by zero with mass on the "
+            "bound; the count columns are means with normal-approximation 95\\% CIs. $\\Delta$EU is the "
+            "shortfall in expected consensus utility against the best algorithm in the same cell, so $0$ means "
+            "nothing was given up. MUL is maximum consensus utility loss. Boldface marks the best value and any "
+            "not significantly worse than it (paired Wilcoxon within cells, $p\\ge0.05$)."
         )
-    )
+        print(write_main_table(subset, envs, out, name, caption, label))
 
-    print("\n" + "=" * 100)
-    print("TABLE 2 -- Indicative results, deep-RL environments (underpowered; see caveats)")
-    print("=" * 100)
-    print(
-        write_main_table(
-            records,
-            indicative,
-            out,
-            "indicative_results_table",
-            "Indicative results on the deep-RL environments. These are reported separately because only a "
-            "handful of cells were affordable and several ran at reduced training budgets, so differences "
-            "here are not statistically resolvable; utility loss is measured against the union of all "
-            "algorithms' returned sets rather than a ground truth. Median [interquartile range].",
-            "tab:indicative",
-        )
-    )
+    if dropped_any:
+        print("\n" + "-" * 100)
+        print(f"Excluded (<= {MIN_CELLS} cells, not reported at any kappa where they were thin):")
+        for env, n in sorted(dropped_any.items()):
+            print(f"  {env}: {n} cells")
 
+    next_table = len(kappas) + 1
     print("\n" + "=" * 100)
-    print("TABLE 3 -- Scaling: cost of OLS relative to MUSOLS")
+    print(f"TABLE {next_table} -- Scaling: cost of OLS relative to MUSOLS")
     print("=" * 100)
     print(write_scaling_table(records, out))
 
+    # The significance table pools heterogeneity levels, so it uses the same cell-count floor applied over the
+    # whole record set rather than per kappa.
+    all_counts = cell_counts(records)
+    reportable = sorted(e for e, n in all_counts.items() if n > MIN_CELLS)
     print("\n" + "=" * 100)
-    print("TABLE 4 -- Paired Wilcoxon signed-rank tests")
+    print(f"TABLE {next_table + 1} -- Paired Wilcoxon signed-rank tests")
     print("=" * 100)
-    print(write_significance_table(records, well_powered, out))
+    if reportable:
+        print(write_significance_table(records, reportable, out))
+    else:
+        print(f"(no environment has more than {MIN_CELLS} cells; nothing written)")
 
     write_scaling_figure(records, out)
     write_anytime_figure(records, "fruit-tree", out, "anytime_fruit_tree", horizon=24)
     write_anytime_figure(records, "synthetic-d4", out, "anytime_synthetic_d4", horizon=24)
-    write_heterogeneity_figure(records, out)
+    write_heterogeneity_figure(records, out, reportable)
 
     print("\n" + "=" * 100)
     print(f"Wrote LaTeX/TikZ assets to {out}/:")

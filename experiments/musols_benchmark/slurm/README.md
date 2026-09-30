@@ -66,12 +66,15 @@ Per-cell costs (one cell = all four algorithms on one panel) were measured on a 
 | lunar-lander | 21375 | 342 s at 8k steps, scaled to 500k |
 | highway | 24300 | 243 s at 5k steps, scaled to 500k |
 | water-reservoir | 2384 | one full cell at 75k steps (real cost measured later at ~9700 — see note) |
-| hopper (demo) | 58528 | **measured**: 3658 s per 1M-step evaluation, x ~16 evaluations per cell |
+| hopper (demo) | 300000+ | **measured**: 18780 s per 1M-step evaluation (job 27373892), x 16+ evaluations |
 
 Most of these are linear extrapolations and their accuracy varies in both directions: minecart's real
 per-evaluation cost came in at ~130–190 s against the 440 s its row predicted at 100k, while water-reservoir's
-real per-cell cost came in at ~9700 s against a predicted 2384 s (4.1x *under*-estimated). Hopper's row is the
-one directly measured at its actual training budget, so it is the most trustworthy of the deep-RL entries.
+real per-cell cost came in at ~9700 s against a predicted 2384 s (4.1x *under*-estimated). Hopper's row was
+revised after job 27373892 measured a full 1M-step evaluation on a Genoa core at **18780 s** against the 3658
+s previously recorded here — 5.1x *under*-estimated, and the reason that job's 1800 s per-algorithm cap
+allowed exactly one evaluation per algorithm. Treat every row in this table as a lower bound until a real run
+on the target hardware has contradicted it.
 
 Every job passes an explicit `--timeout`: a per-algorithm wall-clock cap within one cell, sized above from the
 solver and the measured costs in the table above (with roughly a 30–60× margin for the cheap/exact
@@ -139,7 +142,7 @@ preferences**, what set of policies does each method actually hand them, and wha
 between them do?
 
 ```bash
-sbatch submit_demo.sbatch                      # hopper (default), ~11 h, one task
+sbatch submit_demo.sbatch                      # hopper (default), ~50 h, one task
 sbatch submit_demo.sbatch fruit-tree demo_ft   # any registered environment
 
 # or locally, in seconds, against an exact solver -- useful for building the page:
@@ -147,7 +150,17 @@ python experiments/musols_benchmark/run_demo.py --env deep-sea-treasure --out de
 
 # control environments can also render one rollout per coverage-set policy:
 python experiments/musols_benchmark/run_demo.py --env hopper --record-video --out demo_hopper
+
+# ...but after a cluster run, render from the checkpoints instead, on a machine with a GL backend:
+python experiments/musols_benchmark/render_demo_videos.py demo/demo_hopper --deterministic
 ```
+
+`render_demo_videos.py` exists because `--record-video` on a cluster node is a gamble that only pays out at
+the very end of a multi-day run: MuJoCo resolves its GL backend at *import* time, so the training job sets
+`MUJOCO_GL=disable` and a node without OSMesa cannot render at all. Rendering afterwards from the
+checkpoints costs seconds, needs no rerun, and rewrites `video_files` in place so the directory is
+indistinguishable from one produced inline. It reports each clip's discounted return next to the
+`coverage_set` entry it should match, which is how you catch a checkpoint matched to the wrong policy.
 
 Two environments are worth showing together. **deep-sea-treasure** is legible — a reader can see the whole
 trade-off at once. **hopper** is the control example: d=3 (forward velocity, hop height, energy), continuous
@@ -164,6 +177,49 @@ optimal only for weights no consensus of these stakeholders can produce, and `ru
 
 On deep-sea-treasure, for instance, MUSOLS returns 7 policies and OLS returns 9, of which **2 are optimal
 only outside the consensus polytope** — MUSOLS's set is exactly OLS's useful subset.
+
+### Noisy inner solvers break OLS's assumptions
+
+OLS and MUSOLS are proved correct against an **exact** inner solver: `solve(w)` is assumed to return
+`argmax_v w . v`. A deep-RL inner loop does not, and the error is one-sided in its consequences. A training
+run that lands too *low* closes a corner weight that should have stayed open, and neither algorithm has any
+mechanism that can reopen it — so one unlucky run silently truncates the search. Nothing is ever harmed by a
+solve being too good, which is why the failure shows up as premature convergence rather than as noise.
+
+MUSOLS is the more exposed of the two, and for exactly the reason it is worth having: making few solver calls
+is the point, and few calls means no redundancy. Measured on hopper at a 40k-step budget, MUSOLS reported
+`converged=True` after 2 evaluations with a single policy that was Pareto-dominated in all three objectives
+by one OLS found, ~45% below it across the whole consensus segment. Replaying the same run with
+`ExactEnumerationSolver` over OLS's payoffs recovers the intended result — MUSOLS returns exactly the 2
+policies optimal in Omega_W, in 3 evaluations against OLS's 5 in 14 — so this is a property of the inner
+solver, not a bug in the search.
+
+Two solver knobs address two different noises, and they need opposite operators:
+
+| knob | fixes | why |
+|---|---|---|
+| `num_seeds` | training sometimes lands badly | best of k independent runs, selected by **max** of `w . v` — the inner problem is a maximization, so a mean estimates the wrong quantity |
+| `eval_episodes` | finite-episode Monte Carlo return estimates | those estimates *are* the geometry corner weights are computed from; rollouts are a rounding error against training |
+
+`solve_best_of_seeds` in `solvers.py` deliberately separates selection from reporting: taking the max over
+noisy estimates would trade a pessimistic bias for an optimistic one, picking whichever run got lucky in
+*evaluation*. That is the worse failure, because an over-estimated vector enters the coverage set as a value
+no policy can achieve and can dominate and permanently delete genuine members. So the winner is chosen on one
+evaluation and then re-evaluated on fresh episodes for the value actually returned.
+
+Both default to the study's original behaviour (`num_seeds=1`, `eval_episodes=5`) so existing results stay
+comparable. `submit_demo.sbatch` raises them, since a demo is a handful of solver calls whose failure is
+unrecoverable rather than 100 panels whose noise averages out.
+
+**Consequences for what the paper can claim.** With an approximate inner solver, OLS's guarantees do not
+hold — there is theory for approximate variants giving a bounded-quality result under a uniformly
+epsilon-optimal subroutine, but SAC at a fixed step budget satisfies no such bound. The algorithmic claim
+therefore rests on the exact-solver sweeps (deep-sea-treasure, fruit-tree, synthetic); the deep-RL
+environments demonstrate applicability, not optimality, and should be reported that way. Note also that
+MUSOLS and OLS make different numbers of solver calls and so have different exposure to this noise, which
+confounds a head-to-head on any deep-RL environment: a MUSOLS loss there may be solver variance rather than
+search quality. Holding the *total training budget* fixed rather than the number of distinct weights is the
+cleaner comparison, and it lets MUSOLS spend its smaller weight count on more seeds per weight.
 
 ### The artifact
 

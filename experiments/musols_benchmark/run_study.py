@@ -25,6 +25,7 @@ Examples:
 
 import argparse
 import json
+from collections import defaultdict
 import platform
 import subprocess
 import sys
@@ -113,6 +114,22 @@ def parse_args():
         default=1,
         help="Total number of shards the sweep is split across. Each shard runs the cells whose position "
         "in the (deterministically ordered) cell list is congruent to --shard-index modulo this.",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Skip cells already complete in --out (and in --resume-from, if given), then run the rest. Makes "
+            "resubmitting a shard that was killed by its wall-clock limit safe and idempotent: it costs "
+            "nothing to re-run a finished shard, and a partially finished one picks up where it stopped."
+        ),
+    )
+    parser.add_argument(
+        "--resume-from",
+        type=str,
+        nargs="+",
+        default=[],
+        help="Extra results files to count as already-done when --resume is set (e.g. the merged file).",
     )
     parser.add_argument("--quiet", action="store_true", help="Suppress per-cell progress printing.")
     return parser.parse_args()
@@ -243,6 +260,10 @@ def run_cell(
                 "seed": seed,
                 "num_users": num_users,
                 "num_objectives": config.num_objectives,
+                # Recorded so a results file states the task's own shape (synthetic N and geometry,
+                # fruit-tree depth) rather than leaving it to be inferred from the env key.
+                "env_kwargs": {k: (v if isinstance(v, (int, float, str, bool)) else str(v))
+                               for k, v in config.env_kwargs.items()},
                 "concentration": concentration,
                 # --- the sampled panel and its realized spread ------------------------
                 "user_weights": user_weights.tolist(),
@@ -303,16 +324,56 @@ def main():
     assert 0 <= args.shard_index < args.num_shards, "--shard-index must be in [0, --num-shards)."
     total_cells = len(cells)
     cells = cells[args.shard_index :: args.num_shards]
+
+    if args.resume:
+        # A cell is written as one block of per-algorithm records, so "complete" means every algorithm this
+        # run would produce is already present. A cell cut off mid-write leaves a short block, which is
+        # therefore re-run rather than silently accepted as done.
+        expected = {a for a in ALGORITHMS if not getattr(args, f"skip_{a}", False)}
+        done_algos = defaultdict(set)
+        for path in [out_path, *(Path(p) for p in args.resume_from)]:
+            if not path.exists():
+                continue
+            with path.open() as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue          # truncated tail; its cell stays incomplete and will be re-run
+                    key = (record.get("env"), record.get("seed"), record.get("num_users"),
+                           record.get("concentration"))
+                    done_algos[key].add(record.get("algorithm"))
+        complete = {k for k, algos in done_algos.items() if expected <= algos}
+        before = len(cells)
+        cells = [c for c in cells if c not in complete]
+        if not args.quiet:
+            print(f"--resume: {before - len(cells)} of {before} cells already complete; running {len(cells)}.")
+
     if not args.quiet:
         shard = f" (shard {args.shard_index + 1}/{args.num_shards} of {total_cells} cells)" if args.num_shards > 1 else ""
         print(f"Running {len(cells)} cells x {len(ALGORITHMS)} algorithms{shard} -> {out_path}")
         print(f"git_commit={prov['git_commit']}")
 
     start = time.perf_counter()
+    failures: List[tuple] = []
     with out_path.open("a") as handle:
         for index, (env_key, seed, num_users, concentration) in enumerate(cells, start=1):
             cell_start = time.perf_counter()
-            records = run_cell(env_key, seed, num_users, concentration, args, prov)
+            try:
+                records = run_cell(env_key, seed, num_users, concentration, args, prov)
+            except Exception as exc:
+                # One pathological cell must not cost the whole shard. Numerically degenerate coverage sets
+                # can still defeat the vertex enumeration even after its exact-arithmetic retry, and a shard
+                # holds hundreds of cells, so aborting would discard hours of completed work over one failure.
+                # The cell is recorded as failed and skipped; --resume will retry it on a resubmission, and
+                # report_missing.py counts it as absent rather than silently treating the sweep as finished.
+                failures.append((env_key, seed, num_users, concentration, f"{type(exc).__name__}: {exc}"))
+                print(f"[{index}/{len(cells)}] FAILED {env_key} seed={seed} m={num_users} "
+                      f"kappa={concentration}: {type(exc).__name__}: {exc}", flush=True)
+                continue
             for record in records:
                 handle.write(json.dumps(record) + "\n")
             handle.flush()  # keep partial results durable: a long sweep may be interrupted
@@ -327,6 +388,11 @@ def main():
 
     if not args.quiet:
         print(f"Done in {time.perf_counter() - start:.1f}s; wrote {out_path}")
+    if failures:
+        print(f"\n{len(failures)} cell(s) failed and were skipped:")
+        for env_key, seed, num_users, concentration, reason in failures:
+            print(f"  {env_key} seed={seed} m={num_users} kappa={concentration}: {reason}")
+        print("Re-run with --resume to retry only these.")
 
 
 if __name__ == "__main__":
