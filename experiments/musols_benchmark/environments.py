@@ -10,7 +10,7 @@ and reasonable default hyperparameters. `run_experiment.py` reads from this regi
 of these defaults from the command line.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Dict, List, Optional
 
 import numpy as np

@@ -36,6 +36,7 @@ import platform
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -61,6 +62,23 @@ def parse_args():
     parser.add_argument("--timeout", type=float, default=None, help="Per-algorithm wall-clock cap (s).")
     parser.add_argument("--epsilon", type=float, default=None)
     parser.add_argument(
+        "--solver",
+        type=str,
+        default=None,
+        choices=("exact", "tabular_q", "sac", "discrete_sac"),
+        help=(
+            "Override the environment's inner-loop solver. The point of a demo is usually to show *learned* "
+            "policies, so an environment the study solves by exact enumeration (deep-sea-treasure, fruit-tree) "
+            "has no policy to roll out or render -- pass tabular_q there to train real ones instead."
+        ),
+    )
+    parser.add_argument(
+        "--solver-kwargs",
+        type=str,
+        default=None,
+        help='JSON dict merged into the solver hyperparameters, e.g. \'{"final_epsilon":0.02}\'.',
+    )
+    parser.add_argument(
         "--alpha-samples",
         type=int,
         default=201,
@@ -73,10 +91,19 @@ def parse_args():
         help="Render one rollout per coverage-set policy to an mp4. Needs a renderable environment.",
     )
     parser.add_argument("--video-steps", type=int, default=500, help="Max steps per recorded rollout.")
+    parser.add_argument(
+        "--video-fps",
+        type=float,
+        default=30.0,
+        help=(
+            "Frame rate for recorded rollouts. 30 suits a MuJoCo episode of hundreds of steps; a gridworld "
+            "whose whole episode is a dozen steps needs ~3, or the clip is over before it can be watched."
+        ),
+    )
     return parser.parse_args()
 
 
-def record_rollout(config, agent, path, max_steps):
+def record_rollout(config, agent, path, max_steps, fps=30.0):
     """Renders one greedy rollout of `agent` to an mp4, for showing what a coverage-set policy actually does.
 
     Returns the written path, or None if the environment cannot render (exact-solver environments have no
@@ -103,7 +130,7 @@ def record_rollout(config, agent, path, max_steps):
         env.close()
         if not frames:
             return None
-        imageio.mimsave(path, frames, fps=30, macro_block_size=1)
+        imageio.mimsave(path, frames, fps=fps, macro_block_size=1)
         return path
     except Exception as exc:  # rendering is a nice-to-have; never fail the run over it
         print(f"    (video skipped: {type(exc).__name__}: {exc})")
@@ -163,8 +190,13 @@ def consensus_sweep(coverage_set, W, num_samples):
 def run_algorithm(name, config, args, W, out_dir):
     """Runs one algorithm on the fixed panel and checkpoints the policy behind each coverage-set member."""
     solver_kwargs = dict(config.solver_kwargs)
+    if args.solver is not None and args.solver != config.solver:
+        # Switching solver invalidates the registry's hyperparameters, which were tuned for the original one.
+        solver_kwargs = {}
     if args.total_timesteps is not None:
         solver_kwargs["total_timesteps"] = args.total_timesteps
+    if args.solver_kwargs:
+        solver_kwargs.update(json.loads(args.solver_kwargs))
     epsilon = config.epsilon if args.epsilon is None else args.epsilon
     timeout = config.timeout_seconds if args.timeout is None else args.timeout
 
@@ -228,7 +260,9 @@ def run_algorithm(name, config, args, W, out_dir):
             if args.record_video:
                 video_dir = out_dir / "videos" / name
                 video_dir.mkdir(parents=True, exist_ok=True)
-                written = record_rollout(config, agent, video_dir / f"policy_{i:02d}.mp4", args.video_steps)
+                written = record_rollout(
+                    config, agent, video_dir / f"policy_{i:02d}.mp4", args.video_steps, args.video_fps
+                )
                 video = str(Path(written).relative_to(out_dir)) if written else None
             record["video_files"].append(video)
     return record
@@ -238,6 +272,8 @@ def main():
     args = parse_args()
     assert args.env in ENVIRONMENTS, f"Unknown env {args.env!r}. Known: {sorted(ENVIRONMENTS)}"
     config = ENVIRONMENTS[args.env]
+    if args.solver is not None and args.solver != config.solver:
+        config = replace(config, solver=args.solver)
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -272,6 +308,7 @@ def main():
         "W": W.tolist(),
         "gamma": config.gamma,
         "solver": config.solver,
+        "solver_is_learned": config.solver != "exact",
         "algorithms": results,
         "comparison": {
             "ols_policies_total": ols_total,
