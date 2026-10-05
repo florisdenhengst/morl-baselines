@@ -27,11 +27,17 @@ import numpy as np
 from scipy.stats import wilcoxon
 
 
-# Ordered so the table builds up to the proposed method: naive baseline, undirected baseline, the
-# unrestricted algorithm MUSOLS specialises, then MUSOLS itself.
-ALGORITHMS = ("vertex", "random", "ols", "musols")
-PRETTY = {"musols": "MUSOLS", "random": "Random-$\\Omega_W$", "vertex": "Vertex-only", "ols": "OLS"}
-PRETTY_MD = {"musols": "MUSOLS", "random": "Random-Ω_W", "vertex": "Vertex-only", "ols": "OLS"}
+# Ordered as: the unrestricted algorithm MUSOLS specialises, MUSOLS itself, then its two ablations. The
+# baselines are presented as ablations because that is what they are -- each removes exactly one of MUSOLS's
+# two ideas, so the pair localises where the benefit comes from:
+#   -consensus  drops the consensus search and solves each stakeholder's own weight (formerly "vertex-only"),
+#               so what remains is the restriction without any search of Omega_W's interior;
+#   -search     drops the prioritized corner-weight search for uniform sampling of alpha (formerly
+#               "Random-Omega_W"), so what remains is the restriction without direction.
+# A minus sign rather than a hyphen, since these denote removal, not a compound name.
+ALGORITHMS = ("ols", "musols", "vertex", "random")
+PRETTY = {"ols": "OLS", "musols": "MUSOLS", "vertex": "$-$consensus", "random": "$-$search"}
+PRETTY_MD = {"ols": "OLS", "musols": "MUSOLS", "vertex": "−consensus", "random": "−search"}
 CELL_KEYS = ("env", "seed", "num_users", "concentration")
 # Environments are split by how much evidence they carry, measured from the records rather than listed by
 # name: a hardcoded list silently misfiled synthetic-d5..d8 (600 cells each, ground-truth utility loss) as
@@ -40,6 +46,33 @@ CELL_KEYS = ("env", "seed", "num_users", "concentration")
 # separate "indicative" table: at that sample size no comparison is resolvable, and publishing the rows invites
 # them to be read as results.
 MIN_CELLS = 100
+# Environments reported in the tables, named explicitly per paper_assets_config rather than derived, so the
+# paper's headline set is an editorial choice. A listed environment that turns out thin is warned about rather
+# than silently dropped or silently included.
+MAIN_ENVS = ("deep-sea-treasure", "resource-gathering", "fruit-tree", "synthetic-d8", "water-reservoir")
+MAIN_NUM_USERS = 2      # headline table
+AUX_NUM_USERS = 3       # auxiliary table; m is therefore constant within a table and gets no column
+# Metrics plotted against the number of objectives, one stacked subplot each, sharing an x axis.
+SCALING_PLOT_METRICS = (
+    ("ccs_size", "$|\\mathcal{C}_W|$", "mean"),
+    ("num_evaluated", "Evaluations", "mean"),
+    ("elapsed_seconds", "Runtime (s)", "median_boot"),
+)
+# Panel size for the heterogeneity figure. m=3 rather than m=2: Omega_W is a 2-simplex instead of a segment,
+# so the restricted coverage set has room to move as kappa varies. Measured against the analytic fronts, the
+# kappa=1 -> kappa=50 span at m=3 is 5.56 -> 2.02 on fruit-tree against 3.03 -> 1.64 at m=2, and every task
+# shows the same widening. The m=2 version is emitted alongside it for reference.
+HETEROGENEITY_NUM_USERS = 3
+ENV_SHORT = {"deep-sea-treasure": "DST"}
+HETEROGENEITY_PLOT_METRICS = (
+    ("ccs_size", "CCS size", "mean"),
+    ("num_evaluated", "Evaluations", "mean"),
+)
+# Short, typewriter-set names for plot legends: the full keys will not sit four-across in one shared legend,
+# and deep-sea-treasure in particular crowds out the rest.
+ENV_SHORT = {"deep-sea-treasure": "DST"}
+PLOT_COLOURS = {"vertex": "gray", "random": "teal", "ols": "orange", "musols": "blue"}
+PLOT_MARKS = {"vertex": "triangle*", "random": "square*", "ols": "diamond*", "musols": "*"}
 # The headline table; every other heterogeneity level present gets its own auxiliary table.
 MAIN_CONCENTRATION = 5.0
 
@@ -141,28 +174,53 @@ def _stat(values: Sequence[float], kind: str):
     return _mean_ci(values)
 
 
-def _fmt_stat(point, lo, hi, bold: bool = False) -> str:
-    if point is None:
+def _fmt_value(value, floor=None) -> str:
+    """Formats one number for a table cell: fixed-point, never scientific, floored where floor is given."""
+    if value is None or (isinstance(value, float) and np.isnan(value)):
         return "--"
-    body = f"{_fmt(point)} [{_fmt(lo)}, {_fmt(hi)}]"
-    return f"\\textbf{{{_fmt(point)}}} [{_fmt(lo)}, {_fmt(hi)}]" if bold else body
+    if value == 0:
+        return "0"
+    if floor is not None and abs(value) < floor:
+        return f"$<${floor:g}"
+    magnitude = abs(value)
+    if magnitude >= 100:
+        return f"{value:.0f}"
+    if magnitude >= 10:
+        return f"{value:.1f}"
+    if magnitude >= 1:
+        return f"{value:.2f}"
+    return f"{value:.3f}"
 
 
-def _fmt_stat_md(point, lo, hi, bold: bool = False) -> str:
-    if point is None:
+def _fmt_point(point, floor=None, bold: bool = False, markdown: bool = False) -> str:
+    text = _fmt_value(point, floor)
+    if not bold:
+        return text
+    return f"**{text}**" if markdown else f"\\textbf{{{text}}}"
+
+
+def _fmt_interval(point, lo, hi, floor=None, markdown: bool = False) -> str:
+    """The CI, for its own column. Suppressed when the point estimate is already below the display floor:
+    an interval around a value we are declaring negligible only draws the eye back to the noise."""
+    if point is None or lo is None:
         return "--"
-    head = f"**{_fmt(point)}**" if bold else _fmt(point)
-    return f"{head} [{_fmt(lo)}, {_fmt(hi)}]"
+    if floor is not None and abs(point) < floor:
+        return "--"
+    body = f"[{_fmt_value(lo, floor)}, {_fmt_value(hi, floor)}]"
+    return body if markdown else f"{{\\scriptsize {body}}}"
 
 
-# Metrics reported in the main table. `higher_better` drives which end counts as best for boldface;
-# `kind` picks the interval; ccs/evals/time are costs, delta-EU and MUL are quality.
+# metric key, LaTeX header, markdown header, higher_better, interval kind, display floor.
+# The floor is the magnitude below which a value is reported as negligible rather than printed: delta-EU and
+# MUL routinely land at 1e-6, which is solver noise dressed up as a measurement, and sub-centisecond runtimes
+# say nothing about an algorithm. Printing those as "<0.001" states the finding (indistinguishable from zero)
+# instead of inviting a reader to compare digits that do not mean anything.
 TABLE_METRICS = (
-    ("ccs_size", "$|\\mathcal{C}_W|$", "|CCS|", False, "mean"),
-    ("num_evaluated", "Evals.", "evals", False, "mean"),
-    ("elapsed_seconds", "Time (s)", "time(s)", False, "median_boot"),
-    ("delta_eu", "$\\Delta$EU $\\downarrow$", "dEU", False, "mean_boot"),
-    ("max_consensus_utility_loss", "MUL $\\downarrow$", "MUL", False, "mean"),
+    ("ccs_size", "size$\\downarrow$", "size", False, "mean", None),
+    ("num_evaluated", "evals$\\downarrow$", "evals", False, "mean", None),
+    ("elapsed_seconds", "time (s)$\\downarrow$", "time (s)", False, "median_boot", 1e-2),
+    ("delta_eu", "$\\Delta$-EU$\\downarrow$", "D-EU", False, "mean_boot", 1e-3),
+    ("max_consensus_utility_loss", "MUL$\\downarrow$", "MUL", False, "mean", 1e-3),
 )
 
 
@@ -235,60 +293,118 @@ def _by_cell(records: List[dict]) -> Dict[tuple, Dict[str, dict]]:
 # --------------------------------------------------------------------------------------- main results table
 
 
+def _task_identity(record: dict):
+    """Splits a record's task into (display name, d, depth) so each becomes its own column.
+
+    Environment *keys* encode task parameters in their suffix -- synthetic-d4, fruit-tree-d6 -- which makes a
+    single "Environment" column carry three different pieces of information at once and forces the reader to
+    know the naming convention. Pulling d and depth out means synthetic's seven keys collapse into one named
+    row group distinguished by its d column, and fruit-tree's depths likewise.
+
+    Depth comes from the recorded env_kwargs, so it is the value the run actually used rather than something
+    parsed back out of a name; records written before env_kwargs was stored fall back to the key's suffix.
+    """
+    env = record["env"]
+    d = record.get("num_objectives")
+    kwargs = record.get("env_kwargs") or {}
+    depth = kwargs.get("depth")
+    if env.startswith("synthetic"):
+        display = "synthetic"
+    elif env.startswith("fruit-tree"):
+        display = "fruit-tree"
+        if depth is None and "-d" in env:
+            try:
+                depth = int(env.rsplit("-d", 1)[1])
+            except ValueError:
+                depth = None
+    else:
+        display = env
+    return display, d, depth
+
+
 def main_results_rows(records: List[dict], envs: Sequence[str], markdown: bool = False) -> List[List[str]]:
-    """Per-environment, per-algorithm rows with 95% intervals and significance-aware boldface."""
-    fmt = _fmt_stat_md if markdown else _fmt_stat
-    rows = []
-    for env in envs:
-        block = [r for r in records if r["env"] == env]
-        if not block:
+    """Rows for the main table: task / d / algorithm, then a (point, CI) pair per metric.
+
+    Each metric occupies two cells so the point estimates form a column a reader can scan down without the
+    intervals breaking the alignment; the two share one \\multicolumn header. The task cell carries the task
+    name on its first row and the cell count on its second, which keeps n adjacent to the numbers it was
+    computed from without spending a column on a value that repeats down the block.
+    """
+    wanted = set(envs)
+    groups: Dict[tuple, List[dict]] = defaultdict(list)
+    for record in records:
+        if record["env"] not in wanted:
             continue
+        display, d, _ = _task_identity(record)
+        groups[(display, d)].append(record)
+
+    rows = []
+    for key in sorted(groups, key=lambda k: (k[0], k[1] if k[1] is not None else -1)):
+        display, d = key
+        block = groups[key]
         n_cells = len({tuple(r[k] for k in CELL_KEYS) for r in block})
-        bold = {m: _bold_set(block, m, hi) for m, _, _, hi, _ in TABLE_METRICS}
-        for index, algorithm in enumerate(ALGORITHMS):
+        bold = {metric: _bold_set(block, metric, hi) for metric, _, _, hi, _, _ in TABLE_METRICS}
+        present = [a for a in ALGORITHMS if any(r["algorithm"] == a for r in block)]
+        for index, algorithm in enumerate(present):
             subset = [r for r in block if r["algorithm"] == algorithm]
-            if not subset:
-                continue
             cells = []
-            for metric, _, _, _, kind in TABLE_METRICS:
+            for metric, _, _, _, kind, floor in TABLE_METRICS:
                 point, lo, hi = _stat([r.get(metric) for r in subset], kind)
-                cells.append(fmt(point, lo, hi, bold=algorithm in bold[metric]))
-            rows.append([f"{env} (n={n_cells})" if index == 0 else "", algorithm] + cells)
+                cells.append(_fmt_point(point, floor, algorithm in bold[metric], markdown))
+                cells.append(_fmt_interval(point, lo, hi, floor, markdown))
+            if index == 0:
+                head = [display, str(d) if d is not None else "--"]
+            elif index == 1:
+                head = [f"$n={n_cells}$" if not markdown else f"n={n_cells}", ""]
+            else:
+                head = ["", ""]
+            rows.append(head + [algorithm] + cells + [index == len(present) - 1])
     return rows
 
 
 def write_main_table(records: List[dict], envs: Sequence[str], out: Path, name: str, caption: str, label: str) -> str:
     """Writes the LaTeX main-results table and returns its markdown twin."""
-    latex_head = " & ".join(["Environment", "Algorithm"] + [tex for _, tex, _, _, _ in TABLE_METRICS])
+    n_metrics = len(TABLE_METRICS)
+    # Point estimate right-aligned, its interval left-aligned beside it, so the pair reads as one quantity
+    # while the point column still lines up vertically.
+    colspec = "lrl" + "rl" * n_metrics
+    header = " & ".join(
+        ["task", "$d$", "algorithm"]
+        + [f"\\multicolumn{{2}}{{c}}{{{tex}}}" for _, tex, _, _, _, _ in TABLE_METRICS]
+    )
+
     latex = [
         "% Requires: \\usepackage{booktabs}",
+        "% Wide table: consider \\begin{table*} or \\sidewaystable if it overruns a two-column layout.",
         "\\begin{table}[t]",
         "\\centering",
-        "\\small",
-        "\\begin{tabular}{ll" + "r" * len(TABLE_METRICS) + "}",
+        "\\footnotesize",
+        f"\\begin{{tabular}}{{{colspec}}}",
         "\\toprule",
-        latex_head + " \\\\",
+        header + " \\\\",
         "\\midrule",
     ]
-    previous_env = None
-    for row in main_results_rows(records, envs):
-        if row[0] and previous_env is not None:
-            latex.append("\\midrule")
-        previous_env = row[0] or previous_env
-        env_cell = row[0].replace("_", "\\_") if row[0] else ""
-        cells = [env_cell, PRETTY[row[1]]] + [
-            c.replace("[", "{\\scriptsize [").replace("]", "]}") for c in row[2:]
-        ]
-        latex.append(" & ".join(cells) + " \\\\")
+    rows = main_results_rows(records, envs)
+    for row in rows:
+        *cells, is_last_of_task = row
+        body = [c.replace("_", "\\_") for c in cells[:2]] + [PRETTY[cells[2]]] + cells[3:]
+        # Tasks are separated by vertical space rather than a rule: a \midrule per task chops a table this
+        # tall into slabs, while [.5em] groups the block visually without adding ink.
+        terminator = " \\\\[.5em]" if is_last_of_task and row is not rows[-1] else " \\\\"
+        latex.append(" & ".join(body) + terminator)
     latex += ["\\bottomrule", "\\end{tabular}", f"\\caption{{{caption}}}", f"\\label{{{label}}}",
               "\\end{table}", ""]
     (out / f"{name}.tex").write_text("\n".join(latex))
 
-    headers = ["Environment", "Algorithm"] + [md for _, _, md, _, _ in TABLE_METRICS]
-    lines = ["| " + " | ".join(headers) + " |", "|" + "|".join("---" for _ in headers) + "|"]
+    md_head = ["task", "d", "algorithm"]
+    for _, _, md, _, _, _ in TABLE_METRICS:
+        md_head += [md, f"{md} 95% CI"]
+    lines = ["| " + " | ".join(md_head) + " |", "|" + "|".join("---" for _ in md_head) + "|"]
     for row in main_results_rows(records, envs, markdown=True):
-        lines.append("| " + " | ".join([row[0], PRETTY_MD[row[1]]] + row[2:]) + " |")
+        *cells, _ = row
+        lines.append("| " + " | ".join(cells[:2] + [PRETTY_MD[cells[2]]] + cells[3:]) + " |")
     return "\n".join(lines)
+
 
 
 def scaling_ratios(records: List[dict]) -> Dict[int, Dict[str, float]]:
@@ -422,43 +538,83 @@ def write_significance_table(records: List[dict], envs: Sequence[str], out: Path
 # ------------------------------------------------------------------------------------------------ figures
 
 
-def write_scaling_figure(records: List[dict], out: Path) -> None:
-    """Emits the headline scaling figure: OLS-to-MUSOLS cost ratios against the number of objectives."""
-    ratios = scaling_ratios(records)
-    series = {
-        "Wall-clock time": ("time", "mark=*"),
-        "Evaluations": ("evals", "mark=square*"),
-        "$|\\mathcal{C}|$": ("ccs", "mark=triangle*"),
-    }
+def _errorbar_plot(rows, colour, mark, legend=None, log_x=False):
+    """One pgfplots line with asymmetric 95% CI error bars, from (x, point, lo, hi) tuples.
+
+    Asymmetric rather than symmetric bars because the runtime intervals come from a bootstrap of the median and
+    genuinely are lopsided; halving (hi - lo) would misplace the point estimate.
+    """
     lines = [
-        "% Requires: \\usepackage{pgfplots} \\pgfplotsset{compat=1.18}",
-        "\\begin{figure}[t]",
-        "\\centering",
-        "\\begin{tikzpicture}",
-        "\\begin{axis}[",
-        "    width=0.8\\linewidth, height=6cm,",
-        "    xlabel={Number of objectives $d$},",
-        "    ylabel={Cost of OLS relative to MUSOLS},",
-        "    ymode=log, log basis y={10},",
-        "    xtick={" + ",".join(str(d) for d in ratios) + "},",
-        "    grid=major, legend pos=north west, legend cell align={left},",
-        "]",
+        f"    \\addplot+[color={colour}, mark={mark}, thick, error bars/.cd, y dir=both, y explicit]",
+        "    table[row sep=\\\\, y error plus index=2, y error minus index=3] {",
+        "    x y ep em \\\\",
     ]
-    for label, (key, style) in series.items():
-        coords = " ".join(f"({d},{metrics[key]:.4g})" for d, metrics in ratios.items())
-        lines.append(f"\\addplot+[{style}] coordinates {{{coords}}};")
-        lines.append(f"\\addlegendentry{{{label}}}")
-    lines += [
-        "\\end{axis}",
-        "\\end{tikzpicture}",
-        "\\caption{MUSOLS's advantage over OLS grows superlinearly in the number of objectives. Synthetic "
-        f"single-decision MOMDP ({_synthetic_shape(records)}), "
-        "median over cells, log-scaled ordinate.}",
-        "\\label{fig:scaling}",
-        "\\end{figure}",
-        "",
-    ]
-    (out / "scaling_figure.tex").write_text("\n".join(lines))
+    for x, point, lo, hi in rows:
+        lines.append(f"    {x:g} {point:.6g} {max(hi - point, 0):.6g} {max(point - lo, 0):.6g} \\\\")
+    lines.append("    };")
+    if legend is not None:
+        lines.append(f"    \\addlegendentry{{{legend}}}")
+    lines.append("")   # blank line between series, as in the hand-edited figure
+    return lines
+
+
+def write_scaling_figures(records: List[dict], out: Path) -> None:
+    """Per-metric scalability plots against the number of objectives, one figure per panel size.
+
+    Three stacked subplots sharing an x axis -- coverage-set size, evaluations, runtime -- rather than a single
+    OLS-to-MUSOLS ratio: a ratio compresses two trends into one number and hides that MUSOLS's own cost is
+    flat in d while OLS's is not, which is the actual claim. Each series carries 95% CI error bars, so a
+    reader can see whether neighbouring points are distinguishable.
+    """
+    for num_users in (MAIN_NUM_USERS, AUX_NUM_USERS):
+        subset = [
+            r for r in records
+            if str(r.get("env", "")).startswith("synthetic") and r.get("num_users") == num_users
+            and r.get("concentration") == MAIN_CONCENTRATION
+        ]
+        if not subset:
+            continue
+        lines = [
+            "% Requires: \\usepackage{pgfplots} \\pgfplotsset{compat=1.18} \\usepgfplotslibrary{groupplots}",
+            "\\begin{figure}[t]",
+            "\\centering",
+            "\\begin{tikzpicture}",
+            "\\begin{groupplot}[",
+            f"  group style={{group size=1 by {len(SCALING_PLOT_METRICS)}, vertical sep=4mm, "
+            "x descriptions at=edge bottom},",
+            "  width=0.92\\columnwidth, height=0.36\\columnwidth,",
+            "  xlabel={Number of objectives $d$}, grid=major,",
+            "  legend style={font=\\scriptsize, at={(0.02,0.98)}, anchor=north west},",
+            "  label style={font=\\small}, tick label style={font=\\scriptsize},",
+            "]",
+        ]
+        for metric, ylabel, kind in SCALING_PLOT_METRICS:
+            # Runtime spans orders of magnitude across d; the count metrics do not.
+            logy = ", ymode=log, log basis y={10}" if metric == "elapsed_seconds" else ""
+            lines.append(f"\\nextgroupplot[ylabel={{{ylabel}}}{logy}]")
+            for algorithm in ALGORITHMS:
+                rows = []
+                for d in sorted({r["num_objectives"] for r in subset}):
+                    values = [r.get(metric) for r in subset
+                              if r["num_objectives"] == d and r["algorithm"] == algorithm]
+                    point, lo, hi = _stat(values, kind)
+                    if point is not None:
+                        rows.append((d, point, lo, hi))
+                if rows:
+                    lines += _errorbar_plot(rows, PLOT_COLOURS[algorithm], PLOT_MARKS[algorithm],
+                                            PRETTY[algorithm])
+        lines += [
+            "\\end{groupplot}",
+            "\\end{tikzpicture}",
+            f"\\caption{{Scalability on the synthetic task ({_synthetic_shape(subset)}) with $m={num_users}$ "
+            f"stakeholders at $\\kappa={MAIN_CONCENTRATION:g}$. MUSOLS searches a consensus space of dimension "
+            f"$\\min(d,m)$, so its cost is flat in $d$ while the unrestricted search grows; runtime is on a "
+            "log scale. Error bars are 95\\% CIs (bootstrap for runtime, normal approximation otherwise).}",
+            f"\\label{{fig:scaling-m{num_users}}}",
+            "\\end{figure}",
+            "",
+        ]
+        (out / f"scaling_figure_m{num_users}.tex").write_text("\n".join(lines))
 
 
 def _anytime_curve(records: List[dict], env: str, algorithm: str, horizon: int) -> List[float]:
@@ -516,53 +672,128 @@ def write_anytime_figure(records: List[dict], env: str, out: Path, name: str, ho
 
 
 def write_heterogeneity_figure(records: List[dict], out: Path, envs: Sequence[str] = ()) -> None:
-    """Emits the effect of stakeholder agreement on the size of the returned restricted coverage set.
+    """Coverage-set size and evaluation count against stakeholder agreement, on a log kappa axis.
 
-    Takes the environment list from the caller, which derives it from cell counts, rather than consulting a
-    hardcoded roster. Synthetic tasks are excluded because their heterogeneity response is already covered by
-    the scaling figure, and including seven of them would swamp the real environments.
+    kappa is a concentration parameter, so equal ratios rather than equal differences are comparable -- 1, 5
+    and 50 are roughly evenly spaced only on a log axis. Two stacked subplots share that axis: the restricted
+    coverage set shrinks as a panel becomes unanimous, and the evaluation count follows it, which is the
+    mechanism rather than a coincidence. MUSOLS only, since the question is what the restriction yields.
+
+    One legend for the whole figure, exported from the first subplot with `legend to name` and placed below by
+    a \\node: the series are the same environments in both subplots, so repeating the key would spend space
+    restating it. Written once per panel size, with HETEROGENEITY_NUM_USERS taking the unsuffixed filename so
+    the paper's \\input keeps pointing at the informative one.
     """
     envs = [e for e in envs if not e.startswith("synthetic")]
     if not envs:
         return
-    per_env = defaultdict(dict)
-    for record in records:
-        if record["env"] not in envs or record["algorithm"] != "musols":
+    others = [m for m in (MAIN_NUM_USERS, AUX_NUM_USERS) if m != HETEROGENEITY_NUM_USERS]
+    n_rows = len(HETEROGENEITY_PLOT_METRICS)
+    palette = ["blue", "orange", "teal", "purple", "brown", "olive"]
+    marks = ["*", "square*", "triangle*", "diamond*", "pentagon*", "x"]
+
+    for num_users in [HETEROGENEITY_NUM_USERS, *others]:
+        primary = num_users == HETEROGENEITY_NUM_USERS
+        name = "heterogeneity_figure" if primary else f"heterogeneity_figure_m{num_users}"
+        label = "fig:heterogeneity" if primary else f"fig:heterogeneity-m{num_users}"
+        subset = [
+            r for r in records
+            if r["env"] in envs and r["algorithm"] == "musols" and r.get("num_users") == num_users
+        ]
+        if not subset:
             continue
-        per_env[record["env"]].setdefault(record["concentration"], []).append(record["ccs_size"])
-    kappas = sorted({k for values in per_env.values() for k in values})
-    lines = [
-        "% Requires: \\usepackage{pgfplots} \\pgfplotsset{compat=1.18}",
-        "\\begin{figure}[t]",
-        "\\centering",
-        "\\begin{tikzpicture}",
-        "\\begin{axis}[",
-        "    width=0.8\\linewidth, height=6cm,",
-        "    xlabel={Stakeholder agreement $\\kappa$ (larger is more unanimous)},",
-        "    ylabel={$|\\mathcal{C}_W|$ returned by MUSOLS},",
-        "    xmode=log, log basis x={10},",
-        "    xtick={" + ",".join(f"{k:g}" for k in kappas) + "},",
-        "    xticklabels={" + ",".join(f"{k:g}" for k in kappas) + "},",
-        "    grid=major, legend pos=north east, legend cell align={left},",
-        "]",
-    ]
-    for env in envs:
-        if env not in per_env:
+        kappas = sorted({r["concentration"] for r in subset})
+        if len(kappas) < 2:
+            print(f"  (heterogeneity figure at m={num_users} needs >1 kappa; found {kappas}) -- not written")
             continue
-        coords = " ".join(f"({k:g},{np.median(per_env[env][k]):.4g})" for k in kappas if k in per_env[env])
-        lines.append(f"\\addplot+[mark=*] coordinates {{{coords}}};")
-        lines.append(f"\\addlegendentry{{{env.replace('_', chr(92) + '_')}}}")
-    lines += [
-        "\\end{axis}",
-        "\\end{tikzpicture}",
-        "\\caption{The restricted coverage set shrinks as the stakeholder panel becomes more unanimous. "
-        "$\\kappa$ is the Dirichlet concentration used to sample the panel around a uniformly drawn anchor; "
-        "median over seeds and panel sizes.}",
-        "\\label{fig:heterogeneity}",
-        "\\end{figure}",
-        "",
-    ]
-    (out / "heterogeneity_figure.tex").write_text("\n".join(lines))
+
+        # A series needs at least two kappa levels to show a trend at all. An environment swept at a single
+        # kappa -- water-reservoir, whose job passes --concentrations 5 only -- would otherwise contribute one
+        # marker to a figure about how a quantity *changes*, which reads as a data point rather than as the
+        # absence of one. Dropped, and named, rather than drawn.
+        per_env_kappas = {
+            env: sorted({r["concentration"] for r in subset if r["env"] == env})
+            for env in envs
+        }
+        drawn = [e for e in envs if len(per_env_kappas.get(e, [])) >= 2]
+        for env in envs:
+            found = per_env_kappas.get(env, [])
+            if len(found) < 2:
+                print(f"  heterogeneity (m={num_users}): skipping {env} -- swept at "
+                      f"{len(found)} kappa level(s) {found}, needs >= 2")
+            elif len(found) < len(kappas):
+                print(f"  heterogeneity (m={num_users}): {env} covers only kappa {found} "
+                      f"of {kappas}; its line is partial")
+        if not drawn:
+            print(f"  (heterogeneity figure at m={num_users}: no environment has >= 2 kappa) -- not written")
+            continue
+
+        lines = [
+            f"% Stakeholder homogeneity at m={num_users}.",
+            "% Requires: \\usepackage{pgfplots} \\pgfplotsset{compat=1.18} \\usepgfplotslibrary{groupplots}",
+            "\\begin{figure}[t]",
+            "\\centering",
+            "\\begin{tikzpicture}",
+            "\\begin{groupplot}[",
+            "  group style={",
+            f"    group size=1 by {n_rows}, ",
+            "    vertical sep=4mm, ",
+            "    x descriptions at=edge bottom",
+            "  },",
+            "  width=0.92\\columnwidth, height=0.38\\columnwidth,",
+            "  xlabel={Homogeneity \\(\\kappa\\) (log scale)},",
+            "  xmode=log, log basis x={10}, grid=major,",
+            f"  xtick={{{','.join(f'{k:g}' for k in kappas)}}}, "
+            f"xticklabels={{{','.join(f'{k:g}' for k in kappas)}}},",
+            # Both quantities counted here are at least one, so clipping the axis there keeps the error bars
+            # from implying values that cannot occur.
+            "  ymin=1,",
+            "  legend style={",
+            "    font=\\scriptsize, ",
+            "    at={(0.5,-0.35)}, ",
+            "    anchor=north, ",
+            f"    legend columns={max(len(drawn), 1)}",
+            "  },",
+            "  label style={font=\\small}, tick label style={font=\\scriptsize},",
+            "]",
+        ]
+        for row, (metric, ylabel, kind) in enumerate(HETEROGENEITY_PLOT_METRICS):
+            if row == 0:
+                lines += [
+                    "\\nextgroupplot[",
+                    f"  ylabel={{{ylabel}}},",
+                    "  legend to name=grouplegend % Exports the single legend for the group",
+                    "]",
+                ]
+            else:
+                lines.append(f"\\nextgroupplot[ylabel={{{ylabel}}}]")
+            for index, env in enumerate(drawn):
+                rows = []
+                for kappa in kappas:
+                    values = [r.get(metric) for r in subset
+                              if r["env"] == env and r["concentration"] == kappa]
+                    point, lo, hi = _stat(values, kind)
+                    if point is not None:
+                        rows.append((kappa, point, lo, hi))
+                if not rows:
+                    continue
+                entry = f"\\texttt{{{ENV_SHORT.get(env, env)}}}" if row == 0 else None
+                lines += _errorbar_plot(rows, palette[index % len(palette)],
+                                        marks[index % len(marks)], entry)
+        lines += [
+            "\\end{groupplot}",
+            "",
+            "% Renders the shared legend centered below the entire groupplot",
+            f"\\node at (group c1r{n_rows}.south) [anchor=north, yshift=-0.85cm] {{\\ref{{grouplegend}}}};",
+            "\\end{tikzpicture}",
+            f"\\caption{{CCS size and number of evaluations for varying user preference weight homogeneity "
+            f"as expressed by the Dirichlet concentration parameter $\\kappa$, with $m={num_users}$ users. "
+            "Higher $\\kappa$ means more homogeneity. Error bars are 95\\% CIs.}",
+            f"\\label{{{label}}}",
+            "\\end{figure}",
+            "",
+        ]
+        (out / f"{name}.tex").write_text("\n".join(lines))
 
 
 def main():
@@ -579,50 +810,56 @@ def main():
             per_env[record["env"]].add(tuple(record[k] for k in CELL_KEYS))
         return {env: len(cs) for env, cs in per_env.items()}
 
-    kappas = sorted({r["concentration"] for r in records if r.get("concentration") is not None})
-    if MAIN_CONCENTRATION in kappas:
-        kappas = [MAIN_CONCENTRATION] + [k for k in kappas if k != MAIN_CONCENTRATION]
-    else:
-        print(f"WARNING: no records at kappa={MAIN_CONCENTRATION:g}; reporting the levels that are present.")
+    present = {r["env"] for r in records}
+    missing = [e for e in MAIN_ENVS if e not in present]
+    if missing:
+        print(f"WARNING: listed environment(s) absent from the results: {', '.join(missing)}")
 
-    dropped_any = {}
-    for position, kappa in enumerate(kappas):
-        subset = [r for r in records if r.get("concentration") == kappa]
+    # Each table fixes one panel size at the headline concentration; kappa is varied only in the figures.
+    table_specs = [
+        (MAIN_NUM_USERS, "main_results_table", "tab:main", "Main results"),
+        (AUX_NUM_USERS, "main_results_table_m{}".format(AUX_NUM_USERS),
+         f"tab:main-m{AUX_NUM_USERS}", "Additional results"),
+    ]
+    kappas = [MAIN_CONCENTRATION]
+
+    for position, (num_users, name, label, role) in enumerate(table_specs):
+        subset = [
+            r for r in records
+            if r.get("concentration") == MAIN_CONCENTRATION and r.get("num_users") == num_users
+        ]
         counts = cell_counts(subset)
-        envs = sorted(e for e, n in counts.items() if n > MIN_CELLS)
-        dropped = {e: n for e, n in counts.items() if n <= MIN_CELLS}
-        dropped_any.update(dropped)
-
-        headline = position == 0
-        name = "main_results_table" if headline else f"main_results_table_k{kappa:g}"
-        label = "tab:main" if headline else f"tab:main-k{kappa:g}"
-        role = "Main results" if headline else "Auxiliary results"
-        heading = f"TABLE {position + 1} -- {role} at kappa={kappa:g}"
+        envs, thin = [], []
+        for env in MAIN_ENVS:
+            n = counts.get(env, 0)
+            if n == 0:
+                continue
+            envs.append(env)
+            if n <= MIN_CELLS:
+                thin.append((env, n))
 
         print("\n" + "=" * 100)
-        print(heading)
+        print(f"TABLE {position + 1} -- {role}: m={num_users}, kappa={MAIN_CONCENTRATION:g}")
         print("=" * 100)
         if not envs:
-            print(f"(no environment has more than {MIN_CELLS} cells at kappa={kappa:g}; nothing written)")
+            print(f"(no listed environment has records at m={num_users}, kappa={MAIN_CONCENTRATION:g})")
             continue
-        print(f"environments: " + ", ".join(f"{e}({counts[e]})" for e in envs))
+        for env, n in thin:
+            # Reported anyway, because the environment list is an editorial choice -- but never silently.
+            print(f"WARNING: {env} has only {n} cells (<= {MIN_CELLS}); its intervals are wide and its "
+                  f"significance tests underpowered.")
+        print("environments: " + ", ".join(f"{e}({counts[e]})" for e in envs))
         caption = (
-            f"{role} at stakeholder heterogeneity $\\kappa={kappa:g}$. Only environments with more than "
-            f"{MIN_CELLS} sampled stakeholder panels are reported. Wall-clock time is the median with a "
-            "percentile bootstrap 95\\% CI, since runtimes are right-skewed and censored at the per-algorithm "
-            "budget; $\\Delta$EU likewise uses a bootstrap, being bounded below by zero with mass on the "
-            "bound; the count columns are means with normal-approximation 95\\% CIs. $\\Delta$EU is the "
-            "shortfall in expected consensus utility against the best algorithm in the same cell, so $0$ means "
-            "nothing was given up. MUL is maximum consensus utility loss. Boldface marks the best value and any "
-            "not significantly worse than it (paired Wilcoxon within cells, $p\\ge0.05$)."
+            f"{role} for $m={num_users}$ stakeholders at heterogeneity $\\kappa={MAIN_CONCENTRATION:g}$. "
+            "Wall-clock time is the median with a percentile bootstrap 95\\% CI, since runtimes are "
+            "right-skewed and censored at the per-algorithm budget; $\\Delta$EU likewise uses a bootstrap, "
+            "being bounded below by zero with mass on the bound; the count columns are means with "
+            "normal-approximation 95\\% CIs. $\\Delta$EU is the shortfall in expected consensus utility "
+            "against the best algorithm in the same cell, so $0$ means nothing was given up. MUL is maximum "
+            "consensus utility loss. Boldface marks the best value and any not significantly worse than it "
+            "(paired Wilcoxon within cells, $p\\ge0.05$)."
         )
         print(write_main_table(subset, envs, out, name, caption, label))
-
-    if dropped_any:
-        print("\n" + "-" * 100)
-        print(f"Excluded (<= {MIN_CELLS} cells, not reported at any kappa where they were thin):")
-        for env, n in sorted(dropped_any.items()):
-            print(f"  {env}: {n} cells")
 
     next_table = len(kappas) + 1
     print("\n" + "=" * 100)
@@ -642,10 +879,10 @@ def main():
     else:
         print(f"(no environment has more than {MIN_CELLS} cells; nothing written)")
 
-    write_scaling_figure(records, out)
+    write_scaling_figures(records, out)
     write_anytime_figure(records, "fruit-tree", out, "anytime_fruit_tree", horizon=24)
     write_anytime_figure(records, "synthetic-d4", out, "anytime_synthetic_d4", horizon=24)
-    write_heterogeneity_figure(records, out, reportable)
+    write_heterogeneity_figure(records, out, [e for e in MAIN_ENVS if e in present])
 
     print("\n" + "=" * 100)
     print(f"Wrote LaTeX/TikZ assets to {out}/:")

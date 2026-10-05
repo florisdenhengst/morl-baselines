@@ -63,7 +63,12 @@ SHARD=${SLURM_ARRAY_TASK_ID:-0}
 echo "host=$(hostname) job=${SLURM_JOB_ID:-none} shard=$SHARD/$NUM_SHARDS name=$NAME"
 echo "args: ${STUDY_ARGS[*]}"
 
-srun python "$REPO_ROOT/experiments/musols_benchmark/run_study.py" \
+# Run python directly rather than under srun. With one task and one core, srun launches nothing it needs to
+# and creates a job *step*: failures are then recorded against step .0 and terminate the step, which is how a
+# single out-of-memory task ends up reported as a step failure with the batch script's own exit path obscured.
+# Without it, the process is the batch step, its exit code is the job's, and accounting (MaxRSS) lands on
+# .batch where it is easier to read. CPU affinity still comes from the cgroup that --cpus-per-task sets.
+python "$REPO_ROOT/experiments/musols_benchmark/run_study.py" \
     "${STUDY_ARGS[@]}" \
     --shard-index "$SHARD" \
     --num-shards "$NUM_SHARDS" \

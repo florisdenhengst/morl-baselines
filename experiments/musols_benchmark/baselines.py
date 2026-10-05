@@ -78,6 +78,11 @@ class VertexOnlySearch(MUSOLS):
         """
         super().__init__(user_weights=user_weights, epsilon=0.0, verbose=verbose)
         self._next_vertex = 0
+        # Counted separately from _next_vertex, which tracks weights *handed out*. The outer loop fetches the
+        # next weight at the end of its body and then re-tests ended(), so a termination test based on weights
+        # dispensed reports "done" while the last one is still unsolved -- the baseline then covers m-1
+        # stakeholders instead of m, and for m=2 serves a single stakeholder.
+        self._num_solved = 0
 
     def next_weight(self) -> Optional[np.ndarray]:
         """Returns the next stakeholder's own weight vector, or None once every stakeholder has been served."""
@@ -91,6 +96,11 @@ class VertexOnlySearch(MUSOLS):
         self._pending_alpha, self._pending_w = alpha, w
         return w
 
+    def add_solution(self, value, w):
+        """Records a solved vertex, then defers to MUSOLS's dominance bookkeeping unchanged."""
+        self._num_solved += 1
+        return super().add_solution(value, w)
+
     def ended(self) -> bool:
-        """Returns True once every stakeholder's own optimum has been solved for."""
-        return self._next_vertex >= self._num_search_users
+        """Returns True once every stakeholder's own optimum has been *solved*, not merely dispensed."""
+        return self._num_solved >= self._num_search_users

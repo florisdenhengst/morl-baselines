@@ -58,6 +58,8 @@ def run_outer_loop(
     num_evaluated = 0
     trajectory: Optional[List[dict]] = [] if record_trajectory else None
     while not algo.ended() and time.perf_counter() - start < max_seconds:
+        if w is None:
+            break  # the algorithm has no further weight to offer, whatever ended() reports
         if max_evaluations is not None and num_evaluated >= max_evaluations:
             break
         value = solver.solve(w)

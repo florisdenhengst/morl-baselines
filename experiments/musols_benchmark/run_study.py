@@ -88,6 +88,29 @@ def parse_args():
     parser.add_argument("--epsilon", type=float, default=None, help="Override the OLS/MUSOLS epsilon.")
     parser.add_argument("--timeout", type=float, default=None, help="Override the per-algorithm wall-clock budget (s).")
     parser.add_argument("--total-timesteps", type=int, default=None, help="Override the RL solver training budget.")
+    parser.add_argument(
+        "--only",
+        type=str,
+        nargs="+",
+        default=None,
+        choices=ALGORITHMS,
+        metavar="ALGORITHM",
+        help=(
+            "Run only these algorithms, e.g. `--only vertex`. Everything else is skipped. Intended for "
+            "re-running one algorithm in isolation after fixing it: the records it writes carry later "
+            "timestamps than the ones they replace, so collect.sh's keep-the-newest dedup supersedes the old "
+            "rows without touching the other algorithms' results. Note that `random` cannot be selected "
+            "without `musols`, since its budget is MUSOLS's realized evaluation count."
+        ),
+    )
+    parser.add_argument(
+        "--skip-musols",
+        action="store_true",
+        help=(
+            "Skip MUSOLS itself. For re-running a single baseline in isolation after fixing it, without "
+            "paying to retrain the others. Requires --skip-random (its budget derives from MUSOLS)."
+        ),
+    )
     parser.add_argument("--skip-ols", action="store_true", help="Skip the full-simplex OLS baseline.")
     parser.add_argument("--skip-random", action="store_true", help="Skip the Random-Omega_W baseline.")
     parser.add_argument("--skip-vertex", action="store_true", help="Skip the vertex-only baseline.")
@@ -229,6 +252,7 @@ def run_cell(
         epsilon=args.epsilon,
         timeout=args.timeout,
         total_timesteps=args.total_timesteps,
+        skip_musols=args.skip_musols,
         skip_ols=args.skip_ols,
         skip_random=args.skip_random,
         skip_vertex=args.skip_vertex,
@@ -301,6 +325,11 @@ def run_cell(
 
 def main():
     args = parse_args()
+    if args.only:
+        # Translated into the skip flags so there is one code path downstream, and so --resume's notion of
+        # which algorithms a cell needs stays in agreement with what is actually run.
+        for algorithm in ALGORITHMS:
+            setattr(args, f"skip_{algorithm}", algorithm not in args.only)
     seeds = parse_seed_list(args.seeds)
     prov = provenance()
 
@@ -354,7 +383,9 @@ def main():
 
     if not args.quiet:
         shard = f" (shard {args.shard_index + 1}/{args.num_shards} of {total_cells} cells)" if args.num_shards > 1 else ""
-        print(f"Running {len(cells)} cells x {len(ALGORITHMS)} algorithms{shard} -> {out_path}")
+        running = [a for a in ALGORITHMS if not getattr(args, f"skip_{a}", False)]
+        which = "all 4 algorithms" if len(running) == len(ALGORITHMS) else f"ONLY {', '.join(running)}"
+        print(f"Running {len(cells)} cells x {which}{shard} -> {out_path}")
         print(f"git_commit={prov['git_commit']}")
 
     start = time.perf_counter()

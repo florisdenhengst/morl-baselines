@@ -32,7 +32,12 @@ import numpy as np
 from scipy.stats import wilcoxon
 
 
-ALGORITHM_ORDER = ("musols", "random", "vertex", "ols")
+# Same order and naming as make_paper_assets.py, so a terminal table and the paper's table can be read
+# against each other. The two baselines are ablations of MUSOLS: "-consensus" drops the consensus search and
+# solves each stakeholder's own weight; "-search" drops the prioritized corner-weight search for uniform
+# sampling of alpha, keeping the restriction to Omega_W.
+ALGORITHM_ORDER = ("ols", "musols", "vertex", "random")
+PRETTY = {"ols": "OLS", "musols": "MUSOLS", "vertex": "-consensus", "random": "-search"}
 # The cell coordinates that identify one paired comparison across algorithms.
 CELL_KEYS = ("env", "seed", "num_users", "concentration")
 METRICS = (
@@ -133,7 +138,7 @@ def summarize(records: List[dict], group_by: Sequence[str], latex: bool) -> None
                 continue
             cells = [_median_iqr([r[m] for r in subset]) for m, _, _ in METRICS]
             converged = f"{sum(bool(r['converged']) for r in subset)}/{len(subset)}"
-            rows.append([algorithm] + cells + [converged])
+            rows.append([PRETTY.get(algorithm, algorithm)] + cells + [converged])
 
         if latex:
             print("\\begin{tabular}{l" + "r" * (len(columns) - 1) + "}")
@@ -164,7 +169,8 @@ def significance_table(records: List[dict], baseline: str, group_by: Sequence[st
         groups[tuple(record[k] for k in group_by)].append(record)
 
     others = [a for a in ALGORITHM_ORDER if a != baseline]
-    print(f"\n### Paired Wilcoxon signed-rank vs {baseline} (p-values; '-' = untestable or identical)")
+    print(f"\n### Paired Wilcoxon signed-rank vs {PRETTY.get(baseline, baseline)} "
+          "(p-values; '-' = untestable or identical)")
     header = list(group_by) + ["n", "comparison"] + [label for _, label, _ in METRICS]
     print("| " + " | ".join(header) + " |")
     print("|" + "|".join("---" for _ in header) + "|")
@@ -178,7 +184,8 @@ def significance_table(records: List[dict], baseline: str, group_by: Sequence[st
                 continue
             cells = [significance(block, baseline, algorithm, metric) for metric, _, _ in METRICS]
             label = " | ".join(str(v) for v in key)
-            print(f"| {label} | {n_cells} | {baseline} vs {algorithm} | " + " | ".join(cells) + " |")
+            comparison = f"{PRETTY.get(baseline, baseline)} vs {PRETTY.get(algorithm, algorithm)}"
+            print(f"| {label} | {n_cells} | {comparison} | " + " | ".join(cells) + " |")
 
 
 def main():

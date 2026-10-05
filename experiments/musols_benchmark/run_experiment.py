@@ -84,6 +84,7 @@ def run_experiment(
     epsilon: float = None,
     timeout: float = None,
     total_timesteps: int = None,
+    skip_musols: bool = False,
     skip_ols: bool = False,
     skip_random: bool = False,
     skip_vertex: bool = False,
@@ -103,6 +104,9 @@ def run_experiment(
             (see below).
         total_timesteps: Overrides the RL solver's per-policy training budget, if given (exact solvers ignore
             this).
+        skip_musols: If True, skip MUSOLS itself. Only useful for re-running a single baseline in isolation
+            (e.g. after fixing a bug in it) without paying to retrain the others. Incompatible with running
+            Random-Omega_W, whose budget is set to MUSOLS's realized evaluation count.
         skip_ols: If True, skip the full-simplex OLS baseline.
         skip_random: If True, skip the Random-Omega_W baseline.
         skip_vertex: If True, skip the vertex-only (per-stakeholder optimum) baseline.
@@ -135,12 +139,20 @@ def run_experiment(
 
     results = {}
 
-    seed_everything(seed)
-    musols_env = _make_seeded_env(config, seed)
-    musols_solver = make_solver(config, musols_env, seed, solver_kwargs)
-    musols = MUSOLS(user_weights=weights, epsilon=epsilon, verbose=False)
-    results["musols"] = run_outer_loop(musols, musols_solver, max_seconds=timeout, record_trajectory=record_trajectory)
-    musols_env.close()
+    assert not (skip_musols and not skip_random), (
+        "Random-Omega_W is given exactly MUSOLS's realized evaluation count, so it cannot run without MUSOLS. "
+        "Pass --skip-random alongside --skip-musols."
+    )
+
+    if not skip_musols:
+        seed_everything(seed)
+        musols_env = _make_seeded_env(config, seed)
+        musols_solver = make_solver(config, musols_env, seed, solver_kwargs)
+        musols = MUSOLS(user_weights=weights, epsilon=epsilon, verbose=False)
+        results["musols"] = run_outer_loop(
+            musols, musols_solver, max_seconds=timeout, record_trajectory=record_trajectory
+        )
+        musols_env.close()
 
     if not skip_random:
         # Re-seed everything identically so the baseline sees the same environment dynamics and solver
@@ -217,6 +229,7 @@ def main():
         epsilon=args.epsilon,
         timeout=args.timeout,
         total_timesteps=args.total_timesteps,
+        skip_musols=args.skip_musols,
         skip_ols=args.skip_ols,
         skip_random=args.skip_random,
         skip_vertex=args.skip_vertex,
