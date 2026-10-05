@@ -408,12 +408,25 @@ _register(
             # signal) needs a substantially larger SAC budget than lunar-lander before its policy starts
             # responding to the objective weighting at all: at 500-8,000 steps, policies trained on
             # near-opposite weight vectors converged to nearly identical behavior (see
-            # reward_normalization.py). 75,000 steps is a middle estimate of the typical budget for SAC to
-            # converge on an environment of this kind.
-            "total_timesteps": 75_000,
+            # reward_normalization.py).
+            #
+            # Raised 75k -> 500k, bringing it in line with every other deep-RL environment. 75k was chosen as
+            # the budget at which policies visibly *differentiate* by weight vector, but differentiation is a
+            # much weaker property than optimality, and optimality is what OLS and MUSOLS assume `solve(w)`
+            # delivers. The study's own numbers show the gap: MUSOLS's expected-consensus-utility shortfall is
+            # exactly 0 on every exact-solver environment and 1.45 here, and the Random-Omega_W ablation --
+            # which makes no use of the search geometry and so cannot be misled by wrong values -- matches or
+            # beats MUSOLS on this environment alone.
+            "total_timesteps": 500_000,
             "net_arch": [64, 64],
             "learning_starts": 256,
             "batch_size": 128,
+            # The default of 5 episodes is a thin Monte Carlo estimate of a stochastic policy's return under
+            # stochastic inflow, and those estimates are not incidental here: they *are* the geometry from
+            # which corner weights and the optimistic bound are computed, so their noise propagates into
+            # which weights get searched at all. At ~100 steps per episode this adds well under 1% to a
+            # 500k-step training run -- by far the cheapest noise reduction available.
+            "eval_episodes": 50,
         },
         epsilon=0.01,
         timeout_seconds=1800.0,

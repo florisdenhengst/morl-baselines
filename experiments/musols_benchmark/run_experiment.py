@@ -78,6 +78,24 @@ def parse_args():
     return parser.parse_args()
 
 
+# MUSOLS variants that relax its assumption of an exact inner solver. Each is reported as its own algorithm
+# rather than replacing MUSOLS, so the classical numbers stay on the record.
+#
+#   musols_mono   (A) Discard a solve beaten at its own weight by a vector already found -- it cannot be an
+#                     argmax, so under an exact solver it cannot occur.
+#   musols_reopen (B) Reopen a weight once the run has *certified* its own solve was suboptimal.
+#   musols_opt    (C) Keep a solved weight eligible on *suspicion*: the optimistic bound stops being capped
+#                     by that weight's own (possibly underestimated) recorded value.
+#
+# On a simulation over real study panels with a deliberately unreliable solver, only (C) moved the result;
+# see slurm/README.md. `max_resolves` is the cost dial and the parameter that actually matters.
+ROBUST_VARIANTS = {
+    "musols_mono": dict(monotone=True),
+    "musols_reopen": dict(reopen_delta=1e-6),
+    "musols_opt": dict(optimism=0.05, max_resolves=1),
+}
+
+
 def run_experiment(
     env_key: str,
     seed: int = 0,
@@ -88,6 +106,7 @@ def run_experiment(
     skip_ols: bool = False,
     skip_random: bool = False,
     skip_vertex: bool = False,
+    robust_variants: tuple = (),
     record_trajectory: bool = False,
     user_weights=None,
     verbose: bool = True,
@@ -110,6 +129,10 @@ def run_experiment(
         skip_ols: If True, skip the full-simplex OLS baseline.
         skip_random: If True, skip the Random-Omega_W baseline.
         skip_vertex: If True, skip the vertex-only (per-stakeholder optimum) baseline.
+        robust_variants: Names of inexact-solver-robust MUSOLS variants to additionally run, from
+            `ROBUST_VARIANTS`. Each is recorded under its own algorithm key so it never overwrites plain
+            MUSOLS -- the classical behaviour stays on the record and can be reported as the ablation.
+            Empty (the default) reproduces the original four-algorithm experiment exactly.
         record_trajectory: If True, have every algorithm snapshot its coverage set after each iteration,
             so quality can be plotted against evaluations spent (anytime curves).
         user_weights: Overrides the environment's hand-picked stakeholder preference matrix W, if given (shape
@@ -138,6 +161,9 @@ def run_experiment(
             print(f"    NOTE: rewards are normalized via {config.reward_wrapper.__name__} (see reward_normalization.py)")
 
     results = {}
+
+    for variant in robust_variants:
+        assert variant in ROBUST_VARIANTS, f"Unknown variant {variant!r}. Known: {sorted(ROBUST_VARIANTS)}"
 
     assert not (skip_musols and not skip_random), (
         "Random-Omega_W is given exactly MUSOLS's realized evaluation count, so it cannot run without MUSOLS. "
@@ -185,6 +211,20 @@ def run_experiment(
             vertex_algo, vertex_solver, max_seconds=timeout, record_trajectory=record_trajectory
         )
         vertex_env.close()
+
+    for variant in robust_variants:
+        # Each variant re-runs MUSOLS's search under the same seed, environment and solver stream, so a
+        # difference against the `musols` record is attributable to the variant's rule and nothing else.
+        seed_everything(seed)
+        variant_env = _make_seeded_env(config, seed)
+        variant_solver = make_solver(config, variant_env, seed, solver_kwargs)
+        variant_algo = MUSOLS(
+            user_weights=weights, epsilon=epsilon, verbose=False, **ROBUST_VARIANTS[variant]
+        )
+        results[variant] = run_outer_loop(
+            variant_algo, variant_solver, max_seconds=timeout, record_trajectory=record_trajectory
+        )
+        variant_env.close()
 
     if not skip_ols:
         # Re-seed everything identically so OLS sees the same environment dynamics and solver stochasticity

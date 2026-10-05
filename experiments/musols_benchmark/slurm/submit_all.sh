@@ -52,12 +52,19 @@ JOBS=(
     # s/cell below is the old measurement scaled by the budget increase; --timeout is sized so that even the
     # pessimistic case -- every one of the 4 algorithms in every cell of a shard exhausting its cap without
     # converging -- stays under the 120 h shard wall-clock. Shard counts were raised where that margin got
-    # tight: worst case is now 64 h/shard (minecart, reacher), 80 h (lunar-lander, highway), 24 h (water).
+    # tight: worst case is now 64 h/shard (minecart, reacher), 80 h (lunar-lander, highway), 96 h (water).
     "minecart|25|120:00:00|2200|--env minecart --seeds $SEEDS --num-users 2 3 --concentrations 5 --total-timesteps 500000 --timeout 7200"
     "reacher|25|120:00:00|4400|--env reacher --seeds $SEEDS --num-users 2 3 --concentrations 5 --total-timesteps 500000 --timeout 7200"
     "lunar-lander|70|120:00:00|21375|--env lunar-lander --seeds $SEEDS --num-users 2 3 --concentrations 5 --total-timesteps 500000 --timeout 25200"
     "highway|50|120:00:00|24300|--env highway --seeds $SEEDS --num-users 2 3 --concentrations 5 --total-timesteps 500000 --timeout 18000"
-    "water-reservoir|50|120:00:00|2384|--env water-reservoir --seeds $SEEDS --num-users 2 3 --concentrations 5 --total-timesteps 75000 --timeout 5400"
+    # Raised 75k -> 500k to match the other deep-RL rows, with eval_episodes=50 set in environments.py. The
+    # per-algorithm cap had to go up with it: MUSOLS ran 3.53 evaluations in a median 1592 s at 75k, i.e.
+    # ~450 s per evaluation, so 500k puts an evaluation near 3000 s and the old 5400 s cap would have
+    # censored MUSOLS itself -- which is the one thing that must not happen, since MUSOLS converging on
+    # 96.6% of cells is what makes its numbers readable. 21600 s leaves it ~7 evaluations against the ~3.5
+    # it needs. OLS stays censored at the cap, as it already was at 75k (0/177 converged); that is accepted
+    # and `converged` records it. Expected ~48600 s/cell, so 4 cells/shard is ~54 h, worst case 96 h.
+    "water-reservoir|50|120:00:00|48600|--env water-reservoir --seeds $SEEDS --num-users 2 3 --concentrations 5 --total-timesteps 500000 --timeout 21600"
 )
 
 wanted() {

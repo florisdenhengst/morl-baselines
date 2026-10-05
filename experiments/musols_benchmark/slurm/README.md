@@ -65,7 +65,7 @@ Per-cell costs (one cell = all four algorithms on one panel) were measured on a 
 | reacher | 4400 | 22 s at 5k steps, scaled to 500k |
 | lunar-lander | 21375 | 342 s at 8k steps, scaled to 500k |
 | highway | 24300 | 243 s at 5k steps, scaled to 500k |
-| water-reservoir | 2384 | one full cell at 75k steps (real cost measured later at ~9700 — see note) |
+| water-reservoir | 48600 | 75k measured at ~9700/cell, scaled to the 500k budget and the 21600 s cap |
 | hopper (demo) | 300000+ | **measured**: 18780 s per 1M-step evaluation (job 27373892), x 16+ evaluations |
 
 Most of these are linear extrapolations and their accuracy varies in both directions: minecart's real
@@ -122,7 +122,14 @@ settings chosen for how each one actually fails rather than one global default:
   `healthy_reward` (+1/step) is added to all three objectives, so an idle agent scores the *maximum* on the
   energy objective — standing still is a real local optimum, and the raw energy swing of 3/step is as large
   as forward velocity's.
-- **water-reservoir stays at 75k**, where we verified policies genuinely differentiate by weight vector.
+- **water-reservoir (75k → 500k)**, plus `eval_episodes=50`. 75k was originally kept because policies
+  visibly *differentiate* by weight vector there — but differentiation is far weaker than optimality, and
+  optimality is what OLS and MUSOLS assume `solve(w)` returns. The study's own numbers show the cost of the
+  gap: MUSOLS's Δ-EU is exactly 0 on every exact-solver environment and 1.45 here, and this is the one
+  environment where the Random-Ω_W ablation matches it. The per-algorithm cap went 5400 → 21600 s with the
+  budget: at ~450 s per evaluation at 75k, 500k puts an evaluation near 3000 s, and the old cap would have
+  censored MUSOLS itself (it converged on 96.6% of cells at 75k, which is what makes its row readable). OLS
+  remains censored at the cap, as it already was — 0/177 converged at 75k — and that is accepted.
 
 Minecart is sparse-reward and even 500k may be low; if its policies still look untrained (a `|CCS|` of 1 for
 every algorithm is the tell), that budget is the first thing to raise again.
@@ -210,6 +217,40 @@ evaluation and then re-evaluated on fresh episodes for the value actually return
 Both default to the study's original behaviour (`num_seeds=1`, `eval_episodes=5`) so existing results stay
 comparable. `submit_demo.sbatch` raises them, since a demo is a handful of solver calls whose failure is
 unrecoverable rather than 100 panels whose noise averages out.
+
+**Robust variants.** `run_experiment.ROBUST_VARIANTS` holds three relaxations of the exact-solver
+assumption, each run and recorded as its own algorithm (`--robust-variants ...` in `run_study.py`) so plain
+MUSOLS's numbers are never overwritten and the classical rule can be reported as the ablation:
+
+| variant | rule |
+|---|---|
+| `musols_mono` | discard a solve that is beaten at its own weight by a vector already found — under an exact solver it cannot be an argmax, so this cannot occur |
+| `musols_reopen` | reopen a weight once the run has *certified* its own solve suboptimal, i.e. some known vector beats what the solver achieved there |
+| `musols_opt` | keep a solved weight eligible on *suspicion*: `max_value_lp` stops capping the optimistic bound at that weight's own, possibly underestimated, recorded value |
+
+Measured on a simulation over the 177 real water-reservoir panels, with the inner solver replaced by one that
+returns a worse candidate with probability `p` (mean EU shortfall against the best achievable set):
+
+| variant | p=0 evals | p=0 shortfall | p=0.5 evals | p=0.5 shortfall |
+|---|---|---|---|---|
+| MUSOLS (classical) | 3.78 | 0 | 3.38 | 1.358 |
+| `musols_reopen` | 3.78 | 0 | 3.68 | 1.348 |
+| `musols_opt`, `max_resolves=1` | 7.42 | 0 | 7.38 | 0.247 |
+| `musols_opt`, `max_resolves=2` | 11.07 | 0 | 11.23 | 0.118 |
+| `musols_opt`, `max_resolves=3` | 14.71 | 0 | 15.09 | <0.001 |
+
+Three things to read off it. **Only the optimistic variant works**: the certificate is sound but nearly inert,
+because it can fire only once a better policy has turned up at some *other* weight — circular exactly when the
+search is short enough that one bad solve truncates it. **Nothing is lost when the solver is exact** (shortfall
+stays 0), so the variants are safe, but they are not free: `musols_opt` costs 2–4x the evaluations regardless
+of whether the noise it guards against is present. **`max_resolves` is the real knob**, not the size of the
+slack — any positive slack makes a weight eligible and the cap decides the spend.
+
+That cost lands directly on MUSOLS's headline claim. OLS averages 10.9 evaluations on water-reservoir, so
+`max_resolves=2` draws level with it and `max_resolves=3` is dearer; only `max_resolves=1` (2x the
+evaluations for a 5.5x reduction in shortfall) keeps a meaningful efficiency advantage, which is why it is
+the registered default. Caveat on the simulation: re-solves draw from a fixed pool in which the good policy
+is always findable, so it flatters the variants relative to real RL, where a re-solve may simply fail again.
 
 **Consequences for what the paper can claim.** With an approximate inner solver, OLS's guarantees do not
 hold — there is theory for approximate variants giving a bounded-quality result under a uniformly

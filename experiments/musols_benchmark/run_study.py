@@ -39,13 +39,15 @@ import numpy as np
 from environments import ENVIRONMENTS
 from metrics import evaluate_coverage_set, exact_restricted_ccs
 from preferences import preference_statistics, sample_user_weights
-from run_experiment import run_experiment
+from run_experiment import ROBUST_VARIANTS, run_experiment
 from synthetic import register_synthetic_configs
 
 from morl_baselines.common.performance_indicators import sparsity
 
 
-ALGORITHMS = ("musols", "random", "vertex", "ols")
+# Robust variants are appended rather than inserted, so existing results files -- whose rows are keyed by
+# algorithm name -- stay readable and the classical MUSOLS row keeps its identity.
+ALGORITHMS = ("musols", "random", "vertex", "ols") + tuple(ROBUST_VARIANTS)
 
 
 def parse_seed_list(values: List[str]) -> List[int]:
@@ -114,6 +116,17 @@ def parse_args():
     parser.add_argument("--skip-ols", action="store_true", help="Skip the full-simplex OLS baseline.")
     parser.add_argument("--skip-random", action="store_true", help="Skip the Random-Omega_W baseline.")
     parser.add_argument("--skip-vertex", action="store_true", help="Skip the vertex-only baseline.")
+    parser.add_argument(
+        "--robust-variants",
+        nargs="*",
+        default=[],
+        choices=sorted(ROBUST_VARIANTS),
+        help=(
+            "Additionally run these inexact-solver-robust MUSOLS variants, each recorded under its own "
+            "algorithm name. Off by default: they cost one extra full search per variant per cell, and "
+            "plain MUSOLS's numbers are the ones already reported."
+        ),
+    )
     parser.add_argument(
         "--weight-samples",
         type=int,
@@ -256,6 +269,7 @@ def run_cell(
         skip_ols=args.skip_ols,
         skip_random=args.skip_random,
         skip_vertex=args.skip_vertex,
+        robust_variants=tuple(args.robust_variants),
         record_trajectory=args.log_trajectory,
         user_weights=user_weights,
         verbose=False,

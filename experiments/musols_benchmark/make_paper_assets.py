@@ -35,9 +35,21 @@ from scipy.stats import wilcoxon
 #   -search     drops the prioritized corner-weight search for uniform sampling of alpha (formerly
 #               "Random-Omega_W"), so what remains is the restriction without direction.
 # A minus sign rather than a hyphen, since these denote removal, not a compound name.
-ALGORITHMS = ("ols", "musols", "vertex", "random")
-PRETTY = {"ols": "OLS", "musols": "MUSOLS", "vertex": "$-$consensus", "random": "$-$search"}
-PRETTY_MD = {"ols": "OLS", "musols": "MUSOLS", "vertex": "−consensus", "random": "−search"}
+# Robust MUSOLS variants are listed after the classical algorithms, so a table built from results that do
+# not contain them is byte-identical to before. Each is its own algorithm, never a replacement for MUSOLS:
+# the classical row stays, and can be presented as the ablation.
+ROBUST_ALGORITHMS = ("musols_mono", "musols_reopen", "musols_opt")
+ALGORITHMS = ("ols", "musols", "vertex", "random") + ROBUST_ALGORITHMS
+PRETTY = {
+    "ols": "OLS", "musols": "MUSOLS", "vertex": "$-$consensus", "random": "$-$search",
+    "musols_mono": "MUSOLS$_{\\mathrm{mono}}$",
+    "musols_reopen": "MUSOLS$_{\\mathrm{cert}}$",
+    "musols_opt": "MUSOLS$_{\\mathrm{opt}}$",
+}
+PRETTY_MD = {
+    "ols": "OLS", "musols": "MUSOLS", "vertex": "−consensus", "random": "−search",
+    "musols_mono": "MUSOLS-mono", "musols_reopen": "MUSOLS-cert", "musols_opt": "MUSOLS-opt",
+}
 CELL_KEYS = ("env", "seed", "num_users", "concentration")
 # Environments are split by how much evidence they carry, measured from the records rather than listed by
 # name: a hardcoded list silently misfiled synthetic-d5..d8 (600 cells each, ground-truth utility loss) as
@@ -497,7 +509,11 @@ def write_significance_table(records: List[dict], envs: Sequence[str], out: Path
         if not block:
             continue
         cells = _by_cell(block)
-        for algorithm in ("random", "vertex", "ols"):
+        # The three classical baselines keep their original order so this table is unchanged for results
+        # files without variants; any robust variants present are appended after them.
+        order = ("random", "vertex", "ols") + tuple(ROBUST_ALGORITHMS)
+        present = [a for a in order if any(r["algorithm"] == a for r in block)]
+        for algorithm in present:
             values = []
             for metric, _ in metrics:
                 pairs = [

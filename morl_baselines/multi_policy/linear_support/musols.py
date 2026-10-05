@@ -76,6 +76,10 @@ class MUSOLS:
         epsilon: float = 0.0,
         verbose: bool = True,
         prune_users: bool = True,
+        monotone: bool = False,
+        reopen_delta: Optional[float] = None,
+        max_resolves: int = 2,
+        optimism: float = 0.0,
     ):
         """Initialize MUSOLS.
 
@@ -89,6 +93,17 @@ class MUSOLS:
                 while shrinking the searched consensus space, and is what keeps the search dimension from
                 growing with the number of users once they become affinely dependent (m > d). Disable only to
                 measure its effect. Defaults to True.
+            monotone (bool): Discard a solve that is beaten at its own consensus weight by a vector already
+                found. Forwarded to the internal `LinearSupport`; see its `add_solution`.
+            reopen_delta (float, optional): Allow a consensus weight to be solved again once the run has
+                certified that its own solve was suboptimal by more than this margin. Forwarded to the
+                internal `LinearSupport`; see its `_is_closed`. MUSOLS is markedly more exposed than OLS to
+                the inexact-solver failure this addresses, because making few solver calls is the whole point
+                and therefore leaves it no redundancy to absorb a bad one. None keeps classical behaviour.
+            max_resolves (int): Cap on reopenings per consensus weight. Defaults to 2.
+            optimism (float): Relative slack on recorded values when bounding achievable consensus utility,
+                so a weight stays eligible on suspicion that its solve underperformed rather than on proof.
+                Forwarded to the internal `LinearSupport`; see its `max_value_lp`.
         """
         self.W = np.asarray(user_weights, dtype=np.float32)
         assert self.W.ndim == 2, "user_weights must be a (num_objectives, num_users) matrix."
@@ -116,7 +131,15 @@ class MUSOLS:
 
         # Delegate corner weight computation, dominance checks and prioritization to a standard LinearSupport
         # instance operating in the consensus weight (alpha) space of the retained users.
-        self._ls = LinearSupport(num_objectives=self._num_search_users, epsilon=epsilon, verbose=False)
+        self._ls = LinearSupport(
+            num_objectives=self._num_search_users,
+            epsilon=epsilon,
+            verbose=False,
+            monotone=monotone,
+            reopen_delta=reopen_delta,
+            max_resolves=max_resolves,
+            optimism=optimism,
+        )
         self._pending_alpha: Optional[np.ndarray] = None
         self._pending_w: Optional[np.ndarray] = None
 
