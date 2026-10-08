@@ -76,15 +76,52 @@ SCALING_PLOT_METRICS = (
 # shows the same widening. The m=2 version is emitted alongside it for reference.
 HETEROGENEITY_NUM_USERS = 3
 ENV_SHORT = {"deep-sea-treasure": "DST"}
+# metric key, y label, interval kind, report relative to the smallest kappa.
+# Runtime is reported as a ratio against kappa=1 rather than in seconds. Absolute runtimes differ by two
+# orders of magnitude between the exact-solver and learned-solver tasks (0.02 s to 3.4 s), so on a shared axis
+# the separation between environments swamps the trend across kappa, which is what the figure is about. As a
+# ratio every environment starts at 1 and the question becomes how much cheaper a homogeneous panel is.
 HETEROGENEITY_PLOT_METRICS = (
-    ("ccs_size", "CCS size", "mean"),
-    ("num_evaluated", "Evaluations", "mean"),
+    ("ccs_size", "CCS size", "mean", False),
+    ("num_evaluated", "Evaluations", "mean", False),
+    ("elapsed_seconds", "Runtime rel.\\ $\\kappa{=}1$", "median_boot", True),
 )
 # Short, typewriter-set names for plot legends: the full keys will not sit four-across in one shared legend,
 # and deep-sea-treasure in particular crowds out the rest.
 ENV_SHORT = {"deep-sea-treasure": "DST"}
-PLOT_COLOURS = {"vertex": "gray", "random": "teal", "ols": "orange", "musols": "blue"}
-PLOT_MARKS = {"vertex": "triangle*", "random": "square*", "ols": "diamond*", "musols": "*"}
+# Okabe-Ito, the standard colourblind-safe qualitative palette. Defined explicitly rather than relying on
+# xcolor's `blue`/`teal`/`gray`, which are neither distinguishable for the ~8% of readers with a colour
+# deficiency nor legible in grayscale print -- and `gray` in particular all but vanishes.
+#
+# Algorithms and environments draw from DISJOINT subsets. Previously both used the same base colours, so blue
+# meant MUSOLS in the scaling figure and deep-sea-treasure in the heterogeneity figure; a reader carrying an
+# association from one figure to the next was actively misled.
+OKABE_ITO = {
+    "oiBlack": "0,0,0",
+    "oiOrange": "230,159,0",
+    "oiSkyBlue": "86,180,233",
+    "oiGreen": "0,158,115",
+    "oiYellow": "240,228,66",
+    "oiBlue": "0,114,178",
+    "oiVermillion": "213,94,0",
+    "oiPurple": "204,121,167",
+}
+# Algorithm identity, fixed across every figure that plots algorithms.
+PLOT_COLOURS = {"ols": "oiVermillion", "musols": "oiBlue", "vertex": "oiGreen", "random": "oiPurple"}
+PLOT_MARKS = {"ols": "diamond*", "musols": "*", "vertex": "triangle*", "random": "square*"}
+# Environment identity, from the remaining colours so it cannot be confused with an algorithm.
+ENV_COLOUR_CYCLE = ["oiOrange", "oiSkyBlue", "oiBlack", "oiYellow", "oiGreen", "oiVermillion"]
+ENV_MARK_CYCLE = ["*", "square*", "triangle*", "diamond*", "pentagon*", "x"]
+
+
+def _colour_defs(names) -> List[str]:
+    """`\\definecolor` lines for the palette entries a figure uses, so each file stands alone."""
+    seen, lines = set(), []
+    for name in names:
+        if name in OKABE_ITO and name not in seen:
+            seen.add(name)
+            lines.append(f"\\definecolor{{{name}}}{{RGB}}{{{OKABE_ITO[name]}}}")
+    return lines
 # The headline table; every other heterogeneity level present gets its own auxiliary table.
 MAIN_CONCENTRATION = 5.0
 
@@ -170,6 +207,38 @@ def _mean_ci(values: Sequence[float]):
         return point, point, point
     half = 1.96 * float(arr.std(ddof=1)) / np.sqrt(arr.size)
     return point, point - half, point + half
+
+
+def _ratio_bootstrap_ci(values: Sequence[float], baseline: Sequence[float],
+                        resamples: int = 10_000, seed: int = 0):
+    """Ratio of medians against a baseline sample, with a percentile bootstrap 95% CI.
+
+    The numerator and denominator come from *different* cells -- a panel drawn at kappa=5 is not the same panel
+    as one drawn at kappa=1 -- so the two samples are resampled independently rather than paired. Dividing the
+    numerator's own confidence bounds by a point estimate of the denominator would treat the baseline as known
+    exactly and understate the interval; bootstrapping both propagates its uncertainty too.
+
+    At the baseline itself this returns exactly 1 with a non-degenerate interval, which is the right thing to
+    show: it is the noise floor against which the other ratios should be read.
+    """
+    num, den = _clean(values), _clean(baseline)
+    if num.size == 0 or den.size == 0:
+        return None, None, None
+    den_median = float(np.median(den))
+    if abs(den_median) < 1e-12:
+        return None, None, None
+    point = float(np.median(num)) / den_median
+    if num.size < 2 or den.size < 2:
+        return point, point, point
+    rng = np.random.default_rng(seed)
+    num_draws = np.median(rng.choice(num, size=(resamples, num.size), replace=True), axis=1)
+    den_draws = np.median(rng.choice(den, size=(resamples, den.size), replace=True), axis=1)
+    safe = np.abs(den_draws) > 1e-12
+    ratios = num_draws[safe] / den_draws[safe]
+    if ratios.size == 0:
+        return point, point, point
+    lo, hi = np.percentile(ratios, [2.5, 97.5])
+    return point, float(lo), float(hi)
 
 
 def _stat(values: Sequence[float], kind: str):
@@ -561,7 +630,8 @@ def _errorbar_plot(rows, colour, mark, legend=None, log_x=False):
     genuinely are lopsided; halving (hi - lo) would misplace the point estimate.
     """
     lines = [
-        f"    \\addplot+[color={colour}, mark={mark}, thick, error bars/.cd, y dir=both, y explicit]",
+        f"    \\addplot+[color={colour}, mark={mark}, mark options={{fill={colour}}}, thick, "
+        "error bars/.cd, y dir=both, y explicit]",
         "    table[row sep=\\\\, y error plus index=2, y error minus index=3] {",
         "    x y ep em \\\\",
     ]
@@ -592,6 +662,7 @@ def write_scaling_figures(records: List[dict], out: Path) -> None:
             continue
         lines = [
             "% Requires: \\usepackage{pgfplots} \\pgfplotsset{compat=1.18} \\usepgfplotslibrary{groupplots}",
+            *_colour_defs(PLOT_COLOURS.values()),
             "\\begin{figure}[t]",
             "\\centering",
             "\\begin{tikzpicture}",
@@ -633,53 +704,91 @@ def write_scaling_figures(records: List[dict], out: Path) -> None:
         (out / f"scaling_figure_m{num_users}.tex").write_text("\n".join(lines))
 
 
-def _anytime_curve(records: List[dict], env: str, algorithm: str, horizon: int) -> List[float]:
-    """Median expected utility after each evaluation, carrying each run's last value forward to `horizon`.
+def _anytime_gap_curves(records: List[dict], env: str, horizon: int):
+    """Per-algorithm anytime utility *shortfall* curves, normalized within each cell.
 
-    Carrying forward is the right treatment for an anytime algorithm: once it has converged it would keep
-    reporting the same set, so its curve is flat rather than undefined beyond that point.
+    Returns {algorithm: [(evaluations, mean gap, ci_lo, ci_hi), ...]}.
+
+    The shortfall is against the best expected consensus utility any algorithm reached in that same cell, so
+    every curve decays towards zero and lower is better. Plotting absolute utility instead makes error bars
+    useless rather than merely ugly: achievable utility varies enormously between cells -- on deep-sea-treasure
+    the between-cell standard deviation of final utility is 7.8 against a mean anytime improvement of 0.72, so
+    bars drawn on the raw value would be eleven times taller than the effect the figure is about, and would be
+    measuring how much treasure a panel can reach rather than how fast an algorithm gets there. Normalizing
+    per cell removes that scale and leaves variation in anytime behaviour, which is the quantity of interest.
+
+    Carrying each run's last value forward is the right treatment for an anytime algorithm: once converged it
+    would keep reporting the same set, so the curve is flat beyond that point rather than undefined.
     """
-    curves = []
+    per_cell: Dict[tuple, Dict[str, List[float]]] = defaultdict(dict)
     for record in records:
-        if record["env"] != env or record["algorithm"] != algorithm or not record.get("trajectory"):
+        if record["env"] != env or not record.get("trajectory"):
             continue
         values = [step["expected_consensus_utility"] for step in record["trajectory"]]
         if not values:
             continue
-        curves.append(values + [values[-1]] * (horizon - len(values)))
-    if not curves:
-        return []
-    return [float(np.median([c[i] for c in curves])) for i in range(horizon)]
+        key = tuple(record[k] for k in CELL_KEYS)
+        per_cell[key][record["algorithm"]] = values + [values[-1]] * (horizon - len(values))
+
+    gaps: Dict[str, Dict[int, List[float]]] = defaultdict(lambda: defaultdict(list))
+    for curves in per_cell.values():
+        best = max(max(c) for c in curves.values())
+        for algorithm, curve in curves.items():
+            for i in range(horizon):
+                gaps[algorithm][i].append(best - curve[i])
+
+    # Marker/error-bar positions: dense over the early evaluations where the curves actually move, sparse over
+    # the flat tail, so 24 points across four series do not turn into 96 overlapping bars.
+    ticks = [i for i in range(horizon) if i < 8 or (i + 1) % 4 == 0]
+
+    out = {}
+    for algorithm, by_index in gaps.items():
+        rows = []
+        for i in ticks:
+            point, lo, hi = _mean_bootstrap_ci(by_index[i])
+            if point is not None:
+                rows.append((i + 1, point, lo, hi))
+        if rows:
+            out[algorithm] = rows
+    return out
 
 
 def write_anytime_figure(records: List[dict], env: str, out: Path, name: str, horizon: int = 24) -> None:
-    """Emits an anytime quality curve: expected consensus utility against evaluations spent."""
-    styles = {"musols": "mark=*", "random": "mark=square*", "vertex": "mark=triangle*", "ols": "mark=diamond*"}
+    """Emits an anytime quality curve: utility shortfall against evaluations spent, with 95% CI error bars."""
+    curves = _anytime_gap_curves(records, env, horizon)
+    if not curves:
+        return
     lines = [
         "% Requires: \\usepackage{pgfplots} \\pgfplotsset{compat=1.18}",
+        *_colour_defs(PLOT_COLOURS.values()),
         "\\begin{figure}[t]",
         "\\centering",
         "\\begin{tikzpicture}",
         "\\begin{axis}[",
-        "    width=0.8\\linewidth, height=6cm,",
+        "    width=0.9\\columnwidth, height=6cm,",
         "    xlabel={Policy evaluations},",
-        "    ylabel={Expected consensus utility},",
-        "    grid=major, legend pos=south east, legend cell align={left},",
+        "    ylabel={Utility shortfall $\\Delta$EU $\\downarrow$},",
+        "    ymin=0,",
+        "    grid=major, legend pos=north east, legend cell align={left},",
+        "    legend style={font=\\scriptsize},",
+        "    label style={font=\\small}, tick label style={font=\\scriptsize},",
         "]",
     ]
     for algorithm in ALGORITHMS:
-        curve = _anytime_curve(records, env, algorithm, horizon)
-        if not curve:
+        if algorithm not in curves:
             continue
-        coords = " ".join(f"({i + 1},{v:.6g})" for i, v in enumerate(curve))
-        lines.append(f"\\addplot+[{styles[algorithm]}, mark repeat=3] coordinates {{{coords}}};")
-        lines.append(f"\\addlegendentry{{{PRETTY[algorithm]}}}")
+        lines += _errorbar_plot(curves[algorithm], PLOT_COLOURS[algorithm], PLOT_MARKS[algorithm],
+                                PRETTY[algorithm])
     lines += [
         "\\end{axis}",
         "\\end{tikzpicture}",
-        f"\\caption{{Anytime quality on {env.replace('_', chr(92) + '_')}: median expected consensus utility "
-        "after each policy evaluation, with each run's final value carried forward. MUSOLS reaches its final "
-        "quality within a few evaluations, while OLS spends many more to arrive at the same or lower value.}",
+        f"\\caption{{Anytime behaviour on {env.replace('_', chr(92) + '_')}: expected consensus utility "
+        "forgone after each policy evaluation, measured against the best utility any algorithm reached in the "
+        "same cell, so every curve decays to zero and lower is better. Each run's final value is carried "
+        "forward once it has converged. Normalizing within a cell is what makes the spread interpretable: "
+        "absolute utility differs by an order of magnitude between panels, which would otherwise dominate the "
+        "error bars. Markers are means over cells with 95\\% bootstrap CIs, placed densely over the early "
+        "evaluations and sparsely over the flat tail.}",
         f"\\label{{fig:anytime-{env}}}",
         "\\end{figure}",
         "",
@@ -705,8 +814,6 @@ def write_heterogeneity_figure(records: List[dict], out: Path, envs: Sequence[st
         return
     others = [m for m in (MAIN_NUM_USERS, AUX_NUM_USERS) if m != HETEROGENEITY_NUM_USERS]
     n_rows = len(HETEROGENEITY_PLOT_METRICS)
-    palette = ["blue", "orange", "teal", "purple", "brown", "olive"]
-    marks = ["*", "square*", "triangle*", "diamond*", "pentagon*", "x"]
 
     for num_users in [HETEROGENEITY_NUM_USERS, *others]:
         primary = num_users == HETEROGENEITY_NUM_USERS
@@ -719,6 +826,9 @@ def write_heterogeneity_figure(records: List[dict], out: Path, envs: Sequence[st
         if not subset:
             continue
         kappas = sorted({r["concentration"] for r in subset})
+        # The reference level for the relative-runtime row: the least homogeneous panel swept, so the ratios
+        # read as "how much cheaper once stakeholders agree".
+        baseline_kappa = kappas[0]
         if len(kappas) < 2:
             print(f"  (heterogeneity figure at m={num_users} needs >1 kappa; found {kappas}) -- not written")
             continue
@@ -747,6 +857,7 @@ def write_heterogeneity_figure(records: List[dict], out: Path, envs: Sequence[st
         lines = [
             f"% Stakeholder homogeneity at m={num_users}.",
             "% Requires: \\usepackage{pgfplots} \\pgfplotsset{compat=1.18} \\usepgfplotslibrary{groupplots}",
+            *_colour_defs(ENV_COLOUR_CYCLE[: len(drawn)]),
             "\\begin{figure}[t]",
             "\\centering",
             "\\begin{tikzpicture}",
@@ -761,9 +872,6 @@ def write_heterogeneity_figure(records: List[dict], out: Path, envs: Sequence[st
             "  xmode=log, log basis x={10}, grid=major,",
             f"  xtick={{{','.join(f'{k:g}' for k in kappas)}}}, "
             f"xticklabels={{{','.join(f'{k:g}' for k in kappas)}}},",
-            # Both quantities counted here are at least one, so clipping the axis there keeps the error bars
-            # from implying values that cannot occur.
-            "  ymin=1,",
             "  legend style={",
             "    font=\\scriptsize, ",
             "    at={(0.5,-0.35)}, ",
@@ -773,38 +881,49 @@ def write_heterogeneity_figure(records: List[dict], out: Path, envs: Sequence[st
             "  label style={font=\\small}, tick label style={font=\\scriptsize},",
             "]",
         ]
-        for row, (metric, ylabel, kind) in enumerate(HETEROGENEITY_PLOT_METRICS):
+        for row, (metric, ylabel, kind, relative) in enumerate(HETEROGENEITY_PLOT_METRICS):
+            logy = ", ymode=log, log basis y={10}" if metric == "elapsed_seconds" else ""
             if row == 0:
                 lines += [
                     "\\nextgroupplot[",
-                    f"  ylabel={{{ylabel}}},",
+                    f"  ylabel={{{ylabel}}}{logy}{', ymin=1' if metric != 'elapsed_seconds' else ''},",
                     "  legend to name=grouplegend % Exports the single legend for the group",
                     "]",
                 ]
             else:
-                lines.append(f"\\nextgroupplot[ylabel={{{ylabel}}}]")
+                ymin = ", ymin=1" if metric != "elapsed_seconds" else ""
+                lines.append(f"\\nextgroupplot[ylabel={{{ylabel}}}{logy}{ymin}]")
             for index, env in enumerate(drawn):
+                by_kappa = {
+                    k: [r.get(metric) for r in subset if r["env"] == env and r["concentration"] == k]
+                    for k in kappas
+                }
                 rows = []
                 for kappa in kappas:
-                    values = [r.get(metric) for r in subset
-                              if r["env"] == env and r["concentration"] == kappa]
-                    point, lo, hi = _stat(values, kind)
+                    if relative:
+                        point, lo, hi = _ratio_bootstrap_ci(by_kappa[kappa], by_kappa[baseline_kappa])
+                    else:
+                        point, lo, hi = _stat(by_kappa[kappa], kind)
                     if point is not None:
                         rows.append((kappa, point, lo, hi))
                 if not rows:
                     continue
                 entry = f"\\texttt{{{ENV_SHORT.get(env, env)}}}" if row == 0 else None
-                lines += _errorbar_plot(rows, palette[index % len(palette)],
-                                        marks[index % len(marks)], entry)
+                lines += _errorbar_plot(rows, ENV_COLOUR_CYCLE[index % len(ENV_COLOUR_CYCLE)],
+                                        ENV_MARK_CYCLE[index % len(ENV_MARK_CYCLE)], entry)
         lines += [
             "\\end{groupplot}",
             "",
             "% Renders the shared legend centered below the entire groupplot",
             f"\\node at (group c1r{n_rows}.south) [anchor=north, yshift=-0.85cm] {{\\ref{{grouplegend}}}};",
             "\\end{tikzpicture}",
-            f"\\caption{{CCS size and number of evaluations for varying user preference weight homogeneity "
-            f"as expressed by the Dirichlet concentration parameter $\\kappa$, with $m={num_users}$ users. "
-            "Higher $\\kappa$ means more homogeneity. Error bars are 95\\% CIs.}",
+            f"\\caption{{CCS size, evaluations and runtime for varying user preference weight homogeneity as "
+            f"expressed by the Dirichlet concentration parameter $\\kappa$, with $m={num_users}$ users. "
+            "Higher $\\kappa$ means more homogeneity. Runtime is reported relative to "
+            f"$\\kappa{{=}}{baseline_kappa:g}$ for each environment, since absolute runtimes differ by two "
+            "orders of magnitude across these tasks and would otherwise hide the trend; the interval at the "
+            "reference point is the noise floor the other ratios should be read against. Error bars are "
+            "95\\% CIs (bootstrap for runtime and its ratios, normal approximation for the counts).}",
             f"\\label{{{label}}}",
             "\\end{figure}",
             "",
