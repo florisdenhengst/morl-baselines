@@ -38,15 +38,15 @@ JOBS=(
     # --timeout values below are per-algorithm caps within a cell, explicit here rather than left to fall
     # back to environments.py's own (inconsistent) EnvironmentConfig.timeout_seconds defaults -- see README.md
     # "Where the budgets come from" for the measurements each one is based on.
-    "dst|1|120:00:00|0.3|--env deep-sea-treasure --seeds $SEEDS --num-users 2 3 4 --concentrations 1 5 50 --timeout 30 --log-trajectory"
-    "resource-gathering|4|120:00:00|5.6|--env resource-gathering --seeds $SEEDS --num-users 2 3 4 --concentrations 1 5 50 --timeout 180 --log-trajectory"
-    "fruit-tree|8|120:00:00|21|--env fruit-tree --seeds $SEEDS --num-users 2 3 4 --concentrations 1 5 50 --timeout 120 --log-trajectory"
+    "dst|1|120:00:00|0.3|--env deep-sea-treasure --seeds $SEEDS --num-users 2 3 4 --concentrations 0 5 50 --timeout 30 --log-trajectory"
+    "resource-gathering|4|120:00:00|5.6|--env resource-gathering --seeds $SEEDS --num-users 2 3 4 --concentrations 0 5 50 --timeout 180 --log-trajectory"
+    "fruit-tree|8|120:00:00|21|--env fruit-tree --seeds $SEEDS --num-users 2 3 4 --concentrations 0 5 50 --timeout 120 --log-trajectory"
 
     # --- the scalability grid: m in {2,3} as requested, d well past any public benchmark ------------------
     # OLS is given a 600 s budget per algorithm. It will exhaust it from about d=6 onward; that is the result,
     # not a failure, and `converged` records it. Ratios from censored cells are lower bounds -- analyze.py
     # reports the converged fraction alongside them so the two are never confused.
-    "synthetic|100|120:00:00|265|--synthetic-objectives 2 3 4 5 6 7 8 --synthetic-candidates 30 --synthetic-geometry gaussian --seeds $SEEDS --num-users 2 3 --concentrations 1 5 50 --timeout 600 --log-trajectory"
+    "synthetic|100|120:00:00|265|--synthetic-objectives 2 3 4 5 6 7 8 --synthetic-candidates 30 --synthetic-geometry gaussian --seeds $SEEDS --num-users 2 3 --concentrations 0 5 50 --timeout 600 --log-trajectory"
 
     # --- deep RL: 500k-step training budgets (see README.md) ---------------------------------------------
     # s/cell below is the old measurement scaled by the budget increase; --timeout is sized so that even the

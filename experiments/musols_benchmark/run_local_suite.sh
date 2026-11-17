@@ -26,18 +26,18 @@ stage() {
 # ---------------------------------------------------------------- exact solvers: full seeds, full sweeps
 stage "exact-cheap (DST + resource-gathering)" \
     --env deep-sea-treasure resource-gathering \
-    --seeds 0-9 --num-users 2 3 4 --concentrations 1 5 50 \
+    --seeds 0-9 --num-users 2 3 4 --concentrations 0 5 50 \
     --log-trajectory --out "$OUT/exact_cheap.jsonl"
 
 stage "fruit-tree (d=6, OLS hits its timeout every cell)" \
     --env fruit-tree \
-    --seeds 0-9 --num-users 2 3 4 --concentrations 1 5 50 \
+    --seeds 0-9 --num-users 2 3 4 --concentrations 0 5 50 \
     --log-trajectory --out "$OUT/fruit_tree.jsonl"
 
 # ---------------------------------------------------------------- the scalability grid (headline figure)
 stage "synthetic scalability (d x m)" \
     --synthetic-objectives 2 3 4 --synthetic-candidates 20 \
-    --seeds 0-4 --num-users 2 3 5 --concentrations 1 5 50 \
+    --seeds 0-4 --num-users 2 3 5 --concentrations 0 5 50 \
     --log-trajectory --out "$OUT/scaling.jsonl"
 
 # ---------------------------------------------------------------- deep RL: affordable one first

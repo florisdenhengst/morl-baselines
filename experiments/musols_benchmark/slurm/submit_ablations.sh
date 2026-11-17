@@ -43,10 +43,10 @@ SEEDS="0-99"
 
 # name | shards | time | s/cell for ONE evaluation | run_study.py arguments (mirroring submit_all.sh)
 JOBS=(
-    "dst|1|04:00:00|0.1|--env deep-sea-treasure --seeds $SEEDS --num-users 2 3 4 --concentrations 1 5 50 --timeout 30 --log-trajectory"
-    "resource-gathering|4|04:00:00|2.3|--env resource-gathering --seeds $SEEDS --num-users 2 3 4 --concentrations 1 5 50 --timeout 180 --log-trajectory"
-    "fruit-tree|8|04:00:00|1|--env fruit-tree --seeds $SEEDS --num-users 2 3 4 --concentrations 1 5 50 --timeout 120 --log-trajectory"
-    "synthetic|100|08:00:00|1|--synthetic-objectives 2 3 4 5 6 7 8 --synthetic-candidates 30 --synthetic-geometry gaussian --seeds $SEEDS --num-users 2 3 --concentrations 1 5 50 --timeout 600 --log-trajectory"
+    "dst|1|04:00:00|0.1|--env deep-sea-treasure --seeds $SEEDS --num-users 2 3 4 --concentrations 0 5 50 --timeout 30 --log-trajectory"
+    "resource-gathering|4|04:00:00|2.3|--env resource-gathering --seeds $SEEDS --num-users 2 3 4 --concentrations 0 5 50 --timeout 180 --log-trajectory"
+    "fruit-tree|8|04:00:00|1|--env fruit-tree --seeds $SEEDS --num-users 2 3 4 --concentrations 0 5 50 --timeout 120 --log-trajectory"
+    "synthetic|100|08:00:00|1|--synthetic-objectives 2 3 4 5 6 7 8 --synthetic-candidates 30 --synthetic-geometry gaussian --seeds $SEEDS --num-users 2 3 --concentrations 0 5 50 --timeout 600 --log-trajectory"
     "minecart|25|24:00:00|660|--env minecart --seeds $SEEDS --num-users 2 3 --concentrations 5 --total-timesteps 500000 --timeout 7200"
     "reacher|25|24:00:00|660|--env reacher --seeds $SEEDS --num-users 2 3 --concentrations 5 --total-timesteps 500000 --timeout 7200"
     "lunar-lander|70|48:00:00|7770|--env lunar-lander --seeds $SEEDS --num-users 2 3 --concentrations 5 --total-timesteps 500000 --timeout 25200"

@@ -59,10 +59,10 @@ def parse_args():
         default=["env", "concentration"],
         help=(
             "Record fields to group rows by. Defaults to env and concentration: stakeholder heterogeneity "
-            "changes the achievable restricted coverage set substantially (at d=4 the median |CCS_W| is 2 at "
-            "kappa=1 but 1 at kappa=5, and 72% of kappa=50 panels admit a single policy), so pooling the "
-            "kappa levels averages over qualitatively different regimes. Add num_users to split by panel size "
-            "too, or pass just `env` to pool everything."
+            "changes the achievable restricted coverage set substantially -- a near-unanimous panel often "
+            "admits a single policy, while a divided one does not -- so pooling the kappa levels averages "
+            "over qualitatively different regimes. Add num_users to split by panel size too, or pass just "
+            "`env` to pool everything."
         ),
     )
     parser.add_argument("--latex", action="store_true", help="Emit LaTeX tabular rows instead of markdown.")
@@ -76,11 +76,28 @@ def parse_args():
 
 
 def load(paths: Sequence[str]) -> List[dict]:
-    """Loads every record from the given JSON Lines files."""
+    """Loads every record from the given JSON Lines files, rejecting pre-2026-11-17 ones.
+
+    Records written before that date drew panels as Dir(kappa * c); current ones draw Dir(1 + kappa * c),
+    which is a different distribution at the same nominal kappa. Both label the field `concentration`, so
+    the discriminator is `centre`, which only the current sampler records. Pooling the two would silently
+    average two sampling families into one cell, so loading stops rather than guessing.
+    """
     records = []
     for path in paths:
         with Path(path).open() as handle:
-            records.extend(json.loads(line) for line in handle if line.strip())
+            for line in handle:
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                if "centre" not in record:
+                    raise SystemExit(
+                        f"{path} predates the preference sampler change of 2026-11-17: its records carry no "
+                        f"'centre', so they were drawn as Dir(kappa * c) rather than Dir(1 + kappa * c). At "
+                        f"the same nominal kappa those are different panels and cannot be pooled with "
+                        f"current runs -- re-run the sweep, or analyse the old file with an older checkout."
+                    )
+                records.append(record)
     return records
 
 

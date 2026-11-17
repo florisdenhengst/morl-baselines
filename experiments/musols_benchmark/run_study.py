@@ -84,7 +84,9 @@ def parse_args():
         type=float,
         nargs="+",
         default=[5.0],
-        help="Dirichlet concentrations kappa to sweep: larger means a more unanimous stakeholder panel.",
+        help="Dirichlet concentrations kappa to sweep: larger means a more unanimous stakeholder panel. "
+             "Panels are drawn as Dir(1 + kappa c) around a latent centre c, so kappa=0 is a uniform draw "
+             "over the simplex and the density is unimodal at c for every kappa.",
     )
     parser.add_argument("--out", type=str, required=True, help="Path of the JSON Lines results file to append to.")
     parser.add_argument("--epsilon", type=float, default=None, help="Override the OLS/MUSOLS epsilon.")
@@ -255,8 +257,11 @@ def run_cell(
 
     # Derived solely from the cell's coordinates: the same cell always yields the same panel, and every
     # algorithm in the cell is handed that identical panel.
-    pref_rng = np.random.default_rng([seed, num_users, int(concentration * 1000)])
-    user_weights = sample_user_weights(config.num_objectives, num_users, concentration, pref_rng)
+    # round(), not int(): kappa need not be an integer, and truncation would collapse e.g. kappa=1.001 onto
+    # kappa=1.000 (float(1.001) * 1000 is 1000.9999...), silently handing two swept levels the same panel.
+    pref_rng = np.random.default_rng([seed, num_users, round(concentration * 1000)])
+    panel = sample_user_weights(config.num_objectives, num_users, concentration, pref_rng)
+    user_weights = panel.weights
     pref_stats = preference_statistics(user_weights)
 
     results = run_experiment(
@@ -303,8 +308,12 @@ def run_cell(
                 "env_kwargs": {k: (v if isinstance(v, (int, float, str, bool)) else str(v))
                                for k, v in config.env_kwargs.items()},
                 "concentration": concentration,
-                # --- the sampled panel and its realized spread ------------------------
+                # --- the sampled panel, its latent centre and its realized spread ------
+                # `centre` is the mode of the distribution W was drawn from and no user sits on it, so it is
+                # not recoverable from W and is carried out alongside it. Its presence is also what marks a
+                # record as post-2026-11-17, i.e. drawn from Dir(1 + kappa c) rather than Dir(kappa c).
                 "user_weights": user_weights.tolist(),
+                "centre": panel.centre.tolist(),
                 **pref_stats,
                 # --- search effort ----------------------------------------------------
                 "ccs_size": len(result.ccs),

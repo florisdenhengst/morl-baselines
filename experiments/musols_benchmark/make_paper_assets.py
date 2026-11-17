@@ -71,20 +71,19 @@ SCALING_PLOT_METRICS = (
     ("elapsed_seconds", "Runtime (s)", "median_boot"),
 )
 # Panel size for the heterogeneity figure. m=3 rather than m=2: Omega_W is a 2-simplex instead of a segment,
-# so the restricted coverage set has room to move as kappa varies. Measured against the analytic fronts, the
-# kappa=1 -> kappa=50 span at m=3 is 5.56 -> 2.02 on fruit-tree against 3.03 -> 1.64 at m=2, and every task
-# shows the same widening. The m=2 version is emitted alongside it for reference.
+# so the restricted coverage set has room to move as heterogeneity varies, and every task showed the same
+# widening relative to m=2 under the previous sweep. The m=2 version is emitted alongside it for reference.
 HETEROGENEITY_NUM_USERS = 3
 ENV_SHORT = {"deep-sea-treasure": "DST"}
-# metric key, y label, interval kind, report relative to the smallest kappa.
-# Runtime is reported as a ratio against kappa=1 rather than in seconds. Absolute runtimes differ by two
-# orders of magnitude between the exact-solver and learned-solver tasks (0.02 s to 3.4 s), so on a shared axis
-# the separation between environments swamps the trend across kappa, which is what the figure is about. As a
-# ratio every environment starts at 1 and the question becomes how much cheaper a homogeneous panel is.
+# metric key, y label, interval kind, report relative to the most divided panel swept.
+# Runtime is reported as a ratio rather than in seconds. Absolute runtimes differ by two orders of magnitude
+# between the exact-solver and learned-solver tasks (0.02 s to 3.4 s), so on a shared axis the separation
+# between environments swamps the trend across heterogeneity, which is what the figure is about. As a ratio
+# every environment starts at 1 and the question becomes how much cheaper a homogeneous panel is.
 HETEROGENEITY_PLOT_METRICS = (
     ("ccs_size", "CCS size", "mean", False),
     ("num_evaluated", "Evaluations", "mean", False),
-    ("elapsed_seconds", "Runtime rel.\\ $\\kappa{=}1$", "median_boot", True),
+    ("elapsed_seconds", "Runtime rel.\\ most divided", "median_boot", True),
 )
 # Short, typewriter-set names for plot legends: the full keys will not sit four-across in one shared legend,
 # and deep-sea-treasure in particular crowds out the rest.
@@ -134,11 +133,28 @@ def parse_args():
 
 
 def load(paths: Sequence[str]) -> List[dict]:
-    """Loads every record from the given JSON Lines files."""
+    """Loads every record from the given JSON Lines files, rejecting pre-2026-11-17 ones.
+
+    Records written before that date drew panels as Dir(kappa * c); current ones draw Dir(1 + kappa * c),
+    which is a different distribution at the same nominal kappa. Both label the field `concentration`, so
+    the discriminator is `centre`, which only the current sampler records. Pooling the two would silently
+    average two sampling families into one cell, so loading stops rather than guessing.
+    """
     records = []
     for path in paths:
         with Path(path).open() as handle:
-            records.extend(json.loads(line) for line in handle if line.strip())
+            for line in handle:
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                if "centre" not in record:
+                    raise SystemExit(
+                        f"{path} predates the preference sampler change of 2026-11-17: its records carry no "
+                        f"'centre', so they were drawn as Dir(kappa * c) rather than Dir(1 + kappa * c). At "
+                        f"the same nominal kappa those are different panels and cannot be pooled with "
+                        f"current runs -- re-run the sweep, or analyse the old file with an older checkout."
+                    )
+                records.append(record)
     return records
 
 
@@ -214,7 +230,7 @@ def _ratio_bootstrap_ci(values: Sequence[float], baseline: Sequence[float],
     """Ratio of medians against a baseline sample, with a percentile bootstrap 95% CI.
 
     The numerator and denominator come from *different* cells -- a panel drawn at kappa=5 is not the same panel
-    as one drawn at kappa=1 -- so the two samples are resampled independently rather than paired. Dividing the
+    as one drawn at kappa=0 -- so the two samples are resampled independently rather than paired. Dividing the
     numerator's own confidence bounds by a point estimate of the denominator would treat the baseline as known
     exactly and understate the interval; bootstrapping both propagates its uncertainty too.
 
@@ -797,12 +813,18 @@ def write_anytime_figure(records: List[dict], env: str, out: Path, name: str, ho
 
 
 def write_heterogeneity_figure(records: List[dict], out: Path, envs: Sequence[str] = ()) -> None:
-    """Coverage-set size and evaluation count against stakeholder agreement, on a log kappa axis.
+    """Coverage-set size and evaluation count against realized stakeholder agreement.
 
-    kappa is a concentration parameter, so equal ratios rather than equal differences are comparable -- 1, 5
-    and 50 are roughly evenly spaced only on a log axis. Two stacked subplots share that axis: the restricted
-    coverage set shrinks as a panel becomes unanimous, and the evaluation count follows it, which is the
-    mechanism rather than a coincidence. MUSOLS only, since the question is what the restriction yields.
+    The x axis is the *realized* mean pairwise cosine similarity of the sampled panels, averaged over the
+    seeds at each swept kappa, rather than kappa itself. Realized agreement means the same thing at every d,
+    whereas a nominal concentration does not: Dir(1 + kappa c) still yields a mean pairwise cosine of 0.93 at
+    d=2 against 0.71 at d=8 for kappa=5, because weight vectors lie on the simplex and their norms shrink
+    with d, so a fixed separation subtends a wider angle. The scale is linear, since cosine similarity is a
+    bounded quantity whose differences, not ratios, are meaningful.
+
+    Two stacked subplots share that axis: the restricted coverage set shrinks as a panel becomes unanimous,
+    and the evaluation count follows it, which is the mechanism rather than a coincidence. MUSOLS only,
+    since the question is what the restriction yields.
 
     One legend for the whole figure, exported from the first subplot with `legend to name` and placed below by
     a \\node: the series are the same environments in both subplots, so repeating the key would spend space
@@ -826,15 +848,24 @@ def write_heterogeneity_figure(records: List[dict], out: Path, envs: Sequence[st
         if not subset:
             continue
         kappas = sorted({r["concentration"] for r in subset})
-        # The reference level for the relative-runtime row: the least homogeneous panel swept, so the ratios
-        # read as "how much cheaper once stakeholders agree".
+        # The reference level for the relative-runtime row: the most divided panel swept (smallest kappa),
+        # so the ratios read as "how much cheaper once stakeholders agree".
         baseline_kappa = kappas[0]
         if len(kappas) < 2:
             print(f"  (heterogeneity figure at m={num_users} needs >1 kappa; found {kappas}) -- not written")
             continue
 
-        # A series needs at least two kappa levels to show a trend at all. An environment swept at a single
-        # kappa -- water-reservoir, whose job passes --concentrations 5 only -- would otherwise contribute one
+        # Where each kappa actually landed, pooled over environments and seeds so that one x position serves
+        # every series. Pooling makes the axis a property of the sampler rather than of any one environment.
+        agreement_at = {}
+        for kappa in kappas:
+            realized = [r["mean_pairwise_cosine"] for r in subset
+                        if r["concentration"] == kappa and r.get("mean_pairwise_cosine") is not None
+                        and not np.isnan(r["mean_pairwise_cosine"])]
+            agreement_at[kappa] = float(np.mean(realized)) if realized else float(kappa)
+
+        # A series needs at least two levels to show a trend at all. An environment swept at a single kappa
+        # -- water-reservoir, whose job passes --concentrations 5 only -- would otherwise contribute one
         # marker to a figure about how a quantity *changes*, which reads as a data point rather than as the
         # absence of one. Dropped, and named, rather than drawn.
         per_env_kappas = {
@@ -868,10 +899,10 @@ def write_heterogeneity_figure(records: List[dict], out: Path, envs: Sequence[st
             "    x descriptions at=edge bottom",
             "  },",
             "  width=0.92\\columnwidth, height=0.38\\columnwidth,",
-            "  xlabel={Homogeneity \\(\\kappa\\) (log scale)},",
-            "  xmode=log, log basis x={10}, grid=major,",
-            f"  xtick={{{','.join(f'{k:g}' for k in kappas)}}}, "
-            f"xticklabels={{{','.join(f'{k:g}' for k in kappas)}}},",
+            "  xlabel={Realized agreement (mean pairwise cosine)},",
+            "  grid=major,",
+            f"  xtick={{{','.join(f'{agreement_at[k]:.3f}' for k in kappas)}}}, "
+            f"xticklabels={{{','.join(f'{agreement_at[k]:.2f}' for k in kappas)}}},",
             "  legend style={",
             "    font=\\scriptsize, ",
             "    at={(0.5,-0.35)}, ",
@@ -905,7 +936,9 @@ def write_heterogeneity_figure(records: List[dict], out: Path, envs: Sequence[st
                     else:
                         point, lo, hi = _stat(by_kappa[kappa], kind)
                     if point is not None:
-                        rows.append((kappa, point, lo, hi))
+                        # Plotted against realized agreement rather than nominal kappa: the realized value
+                        # means the same thing at every d, which the nominal one does not.
+                        rows.append((agreement_at[kappa], point, lo, hi))
                 if not rows:
                     continue
                 entry = f"\\texttt{{{ENV_SHORT.get(env, env)}}}" if row == 0 else None
@@ -917,9 +950,10 @@ def write_heterogeneity_figure(records: List[dict], out: Path, envs: Sequence[st
             "% Renders the shared legend centered below the entire groupplot",
             f"\\node at (group c1r{n_rows}.south) [anchor=north, yshift=-0.85cm] {{\\ref{{grouplegend}}}};",
             "\\end{tikzpicture}",
-            f"\\caption{{CCS size, evaluations and runtime for varying user preference weight homogeneity as "
-            f"expressed by the Dirichlet concentration parameter $\\kappa$, with $m={num_users}$ users. "
-            "Higher $\\kappa$ means more homogeneity. Runtime is reported relative to "
+            f"\\caption{{CCS size, evaluations and runtime for varying user preference weight homogeneity, "
+            f"with $m={num_users}$ users. The axis is the realized mean pairwise cosine similarity between "
+            f"the sampled stakeholders, which $\\kappa$ controls; higher means a more "
+            f"homogeneous panel. Runtime is reported relative to "
             f"$\\kappa{{=}}{baseline_kappa:g}$ for each environment, since absolute runtimes differ by two "
             "orders of magnitude across these tasks and would otherwise hide the trend; the interval at the "
             "reference point is the noise floor the other ratios should be read against. Error bars are "
