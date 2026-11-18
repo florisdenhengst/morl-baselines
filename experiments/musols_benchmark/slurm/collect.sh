@@ -95,8 +95,10 @@ export MUSOLS_ONLY_COMMITS="$(IFS=,; echo "${ONLY_COMMITS[*]:-}")"
 # Per-token match counts from every sweep, summed once at the end to report tokens that matched nothing
 # anywhere. Collected across sweeps because a commit legitimately appears in only one of them, so warning
 # per sweep would fire for all the others.
-TOKEN_LOG=$(mktemp -t musols_collect_tokens)
-trap 'rm -f "$TOKEN_LOG"' EXIT
+# An explicit XXXXXX template rather than `mktemp -t <prefix>`: GNU mktemp rejects a template without
+# X's, while the BSD/macOS one appends its own suffix. Spelling it out works on both.
+TOKEN_LOG=$(mktemp "${TMPDIR:-/tmp}/musols_collect_tokens.XXXXXX")
+trap 'rm -f "$TOKEN_LOG" "$MERGED"/.*.jsonl.part' EXIT
 
 printf "%-18s %8s %10s %8s %8s %8s %8s %8s %s\n" SWEEP SHARDS RECORDS KEPT DUPES BROKEN EXCL UNSEL STATUS
 printf "%s\n" "--------------------------------------------------------------------------------------------------------"
@@ -202,7 +204,10 @@ for dir in "$RESULTS"/*/; do
     if [[ $CHECK_ONLY -eq 1 ]]; then
         stderr_out=$(dedup_py "${shards[@]}" 2>&1 >/dev/null)
     else
-        stderr_out=$(dedup_py "${shards[@]}" 2>&1 >"$MERGED/$name.jsonl")
+        # Staged through a part file and moved into place below only once we know something survived, so a
+        # filter that matches nothing -- a mistyped --only-commit, say -- cannot replace a good merge with an
+        # empty file.
+        stderr_out=$(dedup_py "${shards[@]}" 2>&1 >"$MERGED/.$name.jsonl.part")
     fi
 
     read -r total kept dupes broken mixed excluded unselected <<<"$(echo "$stderr_out" | grep '^__STATS__' | sed 's/__STATS__//')"
@@ -217,7 +222,15 @@ for dir in "$RESULTS"/*/; do
     [[ ${unselected:-0} -gt 0 ]] && note "${unselected} record(s) not on the --only-commit list"
     [[ ${excluded:-0} -gt 0 ]] && note "${excluded} record(s) excluded by --exclude-commit"
     [[ ${mixed:-0} -gt 0 ]] && note "${mixed} cell(s) with mixed git_commit -- see warnings below"
-    [[ ${kept:-0} -eq 0 ]] && note "NOTHING KEPT -- no record survived the filters"
+    if [[ ${kept:-0} -gt 0 ]]; then
+        [[ $CHECK_ONLY -eq 0 ]] && mv "$MERGED/.$name.jsonl.part" "$MERGED/$name.jsonl"
+    else
+        note "NOTHING KEPT -- no record survived the filters"
+        if [[ $CHECK_ONLY -eq 0 ]]; then
+            rm -f "$MERGED/.$name.jsonl.part"
+            note "left $(basename "$MERGED")/$name.jsonl as it was"
+        fi
+    fi
     status=${status:-ok}
 
     printf "%-18s %8s %10s %8s %8s %8s %8s %8s %s\n" "$name" "${#shards[@]}" "${total:-0}" "${kept:-0}" "${dupes:-0}" "${broken:-0}" "${excluded:-0}" "${unselected:-0}" "$status"
